@@ -1,0 +1,11 @@
+{
+  "name": "AuraStream — Music & Audio Streaming",
+  "short_name": "AuraStream",
+  "description": "High-fidelity Hindi, Bhojpuri & Global Music Streaming Player with non-stop playlists and synchronized lyrics.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#090a0f",
+  "theme_color": "#090a0f",
+  "categories": ["music", "entertainment"]
+}
