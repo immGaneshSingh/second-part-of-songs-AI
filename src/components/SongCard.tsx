@@ -62,47 +62,13 @@ export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks,
           : 'border-slate-800/80 hover:border-emerald-500/50 hover:shadow-[0_0_24px_rgba(16,185,129,0.20)] hover:-translate-y-0.5'
       } ${className}`}
     >
-      {/* Cover Art Container */}
+      {/* Cover Art Container — Clean image without circle overlays */}
       <div className="relative aspect-square w-full rounded-xl overflow-hidden mb-2 sm:mb-3 shadow-md bg-slate-900">
         <CoverArt
           src={track.coverUrl}
           alt={cleanTitle}
           gradient={track.gradient}
-          showVinylGroove={true}
         />
-
-        {/* Hover / Active Play Button Overlay */}
-        <div
-          className={`absolute inset-0 bg-black/40 backdrop-blur-[1px] flex items-center justify-center transition-all duration-200 ${
-            isPlayingThis
-              ? 'opacity-100'
-              : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
-          }`}
-        >
-          <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 flex items-center justify-center shadow-xl shadow-emerald-500/30 transform transition-transform group-hover:scale-105 active:scale-95">
-            {isPlayingThis ? (
-              <Pause className="w-4 h-4 sm:w-5 sm:h-5 fill-slate-950" />
-            ) : (
-              <Play className="w-4 h-4 sm:w-5 sm:h-5 fill-slate-950 translate-x-0.5" />
-            )}
-          </div>
-        </div>
-
-        {/* Like Heart Button (top right corner) */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleLike(track.id);
-          }}
-          className={`absolute top-1.5 right-1.5 p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 cursor-pointer ${
-            isLiked
-              ? 'bg-black/60 text-rose-500 opacity-100'
-              : 'bg-black/50 text-slate-300 hover:text-white opacity-0 group-hover:opacity-100'
-          }`}
-          aria-label={isLiked ? 'Unlike track' : 'Like track'}
-        >
-          <Heart className={`w-3.5 h-3.5 ${isLiked ? 'fill-rose-500' : ''}`} />
-        </button>
 
         {/* Quiet Genre & Audio Quality Badge */}
         <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1 pointer-events-none">
@@ -115,6 +81,14 @@ export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks,
             </span>
           )}
         </div>
+
+        {/* Active Playing Indicator Badge (no circle covering image) */}
+        {isPlayingThis && (
+          <div className="absolute top-1.5 right-1.5 px-2 py-0.5 rounded-md bg-emerald-500 text-slate-950 text-[9px] font-extrabold tracking-wide shadow-md flex items-center gap-1">
+            <Pause className="w-2.5 h-2.5 fill-slate-950" />
+            <span>PLAYING</span>
+          </div>
+        )}
       </div>
 
       {/* Metadata */}
@@ -133,7 +107,7 @@ export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks,
           </p>
         </div>
 
-        {/* Footer info: dynamic duration and add to playlist */}
+        {/* Footer info: dynamic duration, like heart, and add to playlist */}
         <div className="flex items-center justify-between pt-1.5 border-t border-slate-800/50 text-[10px] sm:text-[11px] text-slate-400">
           <span className="font-mono tabular-nums text-slate-400">
             {track.duration > 0 ? (
@@ -143,7 +117,20 @@ export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks,
             )}
           </span>
 
-          <div className="relative">
+          <div className="flex items-center gap-1 relative">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleLike(track.id);
+              }}
+              className={`p-1 rounded hover:bg-slate-800 transition-colors cursor-pointer ${
+                isLiked ? 'text-rose-500' : 'text-slate-400 hover:text-white'
+              }`}
+              aria-label={isLiked ? 'Unlike track' : 'Like track'}
+              title={isLiked ? 'Unlike track' : 'Like track'}
+            >
+              <Heart className={`w-3.5 h-3.5 ${isLiked ? 'fill-rose-500' : ''}`} />
+            </button>
             <button
               onClick={(e) => {
                 e.stopPropagation();

@@ -14,7 +14,6 @@ export const CoverArt: React.FC<CoverArtProps> = ({
   alt,
   gradient = 'from-violet-600 to-indigo-900',
   className = 'w-full h-full',
-  showVinylGroove = false,
 }) => {
   const [hasError, setHasError] = useState(false);
 
@@ -38,17 +37,7 @@ export const CoverArt: React.FC<CoverArtProps> = ({
           </span>
         </div>
       )}
-
-      {/* Subtle vinyl groove texture overlay */}
-      {showVinylGroove && (
-        <div
-          className="absolute inset-0 pointer-events-none opacity-20 bg-radial from-transparent via-black to-black"
-          style={{
-            backgroundImage:
-              'repeating-radial-gradient(circle at 50% 50%, transparent 0, transparent 4px, rgba(0,0,0,0.3) 5px, rgba(0,0,0,0.3) 6px)',
-          }}
-        />
-      )}
     </div>
   );
 };
+

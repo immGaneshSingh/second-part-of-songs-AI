@@ -59,6 +59,7 @@ import {
   resolvePlaylistSection,
   resolvePlaylistArtist,
   getStrictArtistTracks,
+  smartClassifyTrackMetadata,
   type AIClassifiedTrackResult,
 } from '../utils/audioUtils.ts';
 import { FEATURED_YOUTUBE_PLAYLISTS, getYouTubeThumbnail } from '../utils/youtubeUtils.ts';
@@ -296,8 +297,6 @@ export const AdminPanelModal: React.FC = () => {
   const [coverUrl, setCoverUrl] = useState(COVER_PRESETS[0].url);
   const [isUploadingSongCover, setIsUploadingSongCover] = useState(false);
   const [isOfficial, setIsOfficial] = useState(true);
-  const [lyricsText, setLyricsText] = useState('');
-  const [devanagariLyricsText, setDevanagariLyricsText] = useState('');
 
   // YouTube Playlist Manager State (with Place 1: Section 1-4 and Place 2: Singer in Section 5)
   const [plName, setPlName] = useState('');
@@ -360,19 +359,38 @@ export const AdminPanelModal: React.FC = () => {
     });
   }, [artists, singerSearch, singerLangFilter]);
 
+  const { trackById, artistById, tracksByArtistId } = useMemo(() => {
+    const tMap = new Map<string, (typeof tracks)[0]>();
+    const aMap = new Map<string, (typeof artists)[0]>();
+    const byArtist = new Map<string, typeof tracks>();
+    for (const a of artists) {
+      aMap.set(a.id, a);
+      byArtist.set(a.id, []);
+    }
+    for (const t of tracks) {
+      tMap.set(t.id, t);
+      if (t.artistId && byArtist.has(t.artistId)) {
+        byArtist.get(t.artistId)!.push(t);
+      }
+    }
+    return { trackById: tMap, artistById: aMap, tracksByArtistId: byArtist };
+  }, [tracks, artists]);
+
   const top10StreamedTracks = useMemo(() => {
+    if (!isAdminModalOpen) return [];
     return [...tracks].sort((a, b) => (b.playCount || 0) - (a.playCount || 0)).slice(0, 10);
-  }, [tracks]);
+  }, [tracks, isAdminModalOpen]);
 
   const topSingersByCatalog = useMemo(() => {
+    if (!isAdminModalOpen) return [];
     return [...artists]
       .map((a) => ({
         ...a,
-        songCount: getStrictArtistTracks(tracks, a).length,
+        songCount: (tracksByArtistId.get(a.id) || []).length,
       }))
       .sort((a, b) => b.songCount - a.songCount)
       .slice(0, 6);
-  }, [artists, tracks]);
+  }, [artists, tracksByArtistId, isAdminModalOpen]);
 
   const handleAdminAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -567,14 +585,17 @@ export const AdminPanelModal: React.FC = () => {
       }
       if (!album.trim()) finalAlbum = 'YouTube Official Audio';
     } else if (finalTitle) {
-      // Run AI classification on the song title & artist before saving unless already checked
+      // Run instant local AI classification on the song title & artist before saving unless already checked
       const aiRes =
         songAiResult ||
-        (await aiClassifySingleInput({
-          title: finalTitle,
-          artist: userSelectedSinger ? finalArtist : '',
-          album: finalAlbum,
-        }));
+        smartClassifyTrackMetadata(
+          {
+            title: finalTitle,
+            artist: userSelectedSinger ? finalArtist : '',
+            album: finalAlbum,
+          },
+          artists
+        );
       if (aiRes.cleanTitle && !songAiResult) {
         finalTitle = aiRes.cleanTitle;
       }
@@ -611,16 +632,6 @@ export const AdminPanelModal: React.FC = () => {
       return;
     }
 
-    const lyricsArray = lyricsText
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    const devanagariLyricsArray = devanagariLyricsText
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-
     const matchedArtistObj = artists.find(
       (a) => a.name.trim().toLowerCase() === finalArtist.trim().toLowerCase()
     );
@@ -642,8 +653,6 @@ export const AdminPanelModal: React.FC = () => {
       playCount: Math.floor(Math.random() * 500000) + 50000,
       gradient: 'from-amber-600 via-rose-600 to-indigo-950',
       isOfficial,
-      lyrics: lyricsArray.length > 0 ? lyricsArray : undefined,
-      devanagariLyrics: devanagariLyricsArray.length > 0 ? devanagariLyricsArray : undefined,
     });
 
     setTitle('');
@@ -653,8 +662,6 @@ export const AdminPanelModal: React.FC = () => {
     setSongAiResult(null);
     setUserSelectedSinger(false);
     setUserSelectedSection(false);
-    setLyricsText('');
-    setDevanagariLyricsText('');
     setYtFetchStatus(
       `Uploaded "${createdTrack.title}" by ${createdTrack.artist} (${finalSection.toUpperCase()}) permanently!`
     );
@@ -675,8 +682,8 @@ export const AdminPanelModal: React.FC = () => {
       youtubeInput: plYtInput,
       category: plCategory,
       section: plSection,
-      artistId: matchedPlArtist?.id,
-      artistName: matchedPlArtist?.name,
+      artistId: plUseAISmart ? undefined : matchedPlArtist?.id,
+      artistName: plUseAISmart ? undefined : matchedPlArtist?.name,
       useAISmartCategorize: plUseAISmart,
     });
     setIsAddingPlaylist(false);
@@ -807,30 +814,69 @@ export const AdminPanelModal: React.FC = () => {
     e.target.value = '';
   };
 
-  const storageEstimate = estimateCatalogStorageUsage(tracks.length, playlists.length, 0);
+  const storageEstimate = useMemo(
+    () => estimateCatalogStorageUsage(tracks.length, playlists.length, 0),
+    [tracks.length, playlists.length]
+  );
 
-  const filteredTracks = tracks.filter((t) => {
-    if (sectionFilter !== 'all' && resolveTrackSection(t) !== sectionFilter) {
-      return false;
+  const filteredTracks = useMemo(() => {
+    if (!isAdminModalOpen) return [];
+    const q = searchFilter.trim().toLowerCase();
+    return tracks.filter((t) => {
+      if (sectionFilter !== "all" && (t.section || resolveTrackSection(t)) !== sectionFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        t.title.toLowerCase().includes(q) ||
+        t.artist.toLowerCase().includes(q) ||
+        (t.hindiTitle && t.hindiTitle.toLowerCase().includes(q)) ||
+        t.genre.toLowerCase().includes(q)
+      );
+    });
+  }, [tracks, sectionFilter, searchFilter, isAdminModalOpen]);
+
+  const {
+    hindiCount,
+    bhojpuriCount,
+    bhaktiCount,
+    englishCount,
+    officialCount,
+    ytCount,
+    totalStreams,
+  } = useMemo(() => {
+    if (!isAdminModalOpen) {
+      return {
+        hindiCount: 0,
+        bhojpuriCount: 0,
+        bhaktiCount: 0,
+        englishCount: 0,
+        officialCount: 0,
+        ytCount: 0,
+        totalStreams: 0,
+      };
     }
-    if (!searchFilter.trim()) return true;
-    const q = searchFilter.toLowerCase();
-    return (
-      t.title.toLowerCase().includes(q) ||
-      t.artist.toLowerCase().includes(q) ||
-      (t.hindiTitle && t.hindiTitle.toLowerCase().includes(q)) ||
-      t.genre.toLowerCase().includes(q)
-    );
-  });
-
-  // Calculate statistics & analytics
-  const hindiCount = tracks.filter((t) => resolveTrackSection(t) === 'hindi' || t.genre === 'Hindi' || t.language === 'Hindi').length;
-  const bhojpuriCount = tracks.filter((t) => resolveTrackSection(t) === 'bhojpuri' || t.genre === 'Bhojpuri' || t.language === 'Bhojpuri').length;
-  const bhaktiCount = tracks.filter((t) => resolveTrackSection(t) === 'bhakti' || t.genre === 'Bhakti' || t.language === 'Sanskrit').length;
-  const englishCount = tracks.filter((t) => resolveTrackSection(t) === 'english' || t.genre === 'English' || t.language === 'English').length;
-  const officialCount = tracks.filter((t) => t.isOfficial).length;
-  const ytCount = tracks.filter((t) => Boolean(t.youtubeId)).length;
-  const totalStreams = tracks.reduce((acc, t) => acc + (t.playCount || 0), 0);
+    let hindi = 0, bhojpuri = 0, bhakti = 0, english = 0, official = 0, yt = 0, streams = 0;
+    for (const t of tracks) {
+      const sec = t.section || resolveTrackSection(t);
+      if (sec === "hindi" || t.genre === "Hindi" || t.language === "Hindi") hindi++;
+      if (sec === "bhojpuri" || t.genre === "Bhojpuri" || t.language === "Bhojpuri") bhojpuri++;
+      if (sec === "bhakti" || t.genre === "Bhakti" || t.language === "Sanskrit") bhakti++;
+      if (sec === "english" || t.genre === "English" || t.language === "English") english++;
+      if (t.isOfficial) official++;
+      if (t.youtubeId) yt++;
+      streams += t.playCount || 0;
+    }
+    return {
+      hindiCount: hindi,
+      bhojpuriCount: bhojpuri,
+      bhaktiCount: bhakti,
+      englishCount: english,
+      officialCount: official,
+      ytCount: yt,
+      totalStreams: streams,
+    };
+  }, [tracks, isAdminModalOpen]);
 
   if (!isAdminModalOpen) return null;
 
@@ -1604,9 +1650,11 @@ export const AdminPanelModal: React.FC = () => {
 
                 <div className="divide-y divide-slate-800/60 rounded-2xl border border-slate-800 bg-slate-900/40 overflow-hidden">
                   {playlists.map((pl) => {
-                    const currentPlSec = resolvePlaylistSection(pl);
+                    const currentPlSec = pl.section || resolvePlaylistSection(pl);
                     const currentPlArt =
-                      resolvePlaylistArtist(pl, artists, tracks) || artists[0];
+                      (pl.artistId ? artistById.get(pl.artistId) : undefined) ||
+                      resolvePlaylistArtist(pl, artists) ||
+                      artists[0];
                     return (
                       <div key={pl.id} className="transition-colors">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 hover:bg-slate-800/40">
@@ -1714,7 +1762,7 @@ export const AdminPanelModal: React.FC = () => {
                           ) : (
                             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
                               {pl.trackIds.map((tid) => {
-                                const trk = tracks.find((t) => t.id === tid);
+                                const trk = trackById.get(tid);
                                 if (!trk) return null;
                                 return (
                                   <div
@@ -2205,25 +2253,35 @@ export const AdminPanelModal: React.FC = () => {
                                   try {
                                     setIsUploadingSingerPhoto(true);
                                     const reader = new FileReader();
-                                    reader.onload = async () => {
-                                      try {
-                                        const base64 = reader.result as string;
-                                        const res = await fetch('/api/upload-photo', {
-                                          method: 'POST',
-                                          headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({ dataUrl: base64, filename: file.name }),
-                                        });
-                                        const json = await res.json();
-                                        if (json.success && json.url) {
-                                          setNewSingerImageUrl(json.url);
-                                        } else {
-                                          setNewSingerImageUrl(base64);
+                                    reader.onload = () => {
+                                      const rawDataUrl = reader.result as string;
+                                      const img = new Image();
+                                      img.onload = () => {
+                                        try {
+                                          const canvas = document.createElement('canvas');
+                                          const maxDim = 400;
+                                          const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+                                          canvas.width = Math.max(1, Math.round(img.width * scale));
+                                          canvas.height = Math.max(1, Math.round(img.height * scale));
+                                          const ctx = canvas.getContext('2d');
+                                          if (ctx) {
+                                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                            const compressed = canvas.toDataURL('image/jpeg', 0.84);
+                                            setNewSingerImageUrl(compressed);
+                                          } else {
+                                            setNewSingerImageUrl(rawDataUrl);
+                                          }
+                                        } catch {
+                                          setNewSingerImageUrl(rawDataUrl);
+                                        } finally {
+                                          setIsUploadingSingerPhoto(false);
                                         }
-                                      } catch (err) {
-                                        console.error(err);
-                                      } finally {
+                                      };
+                                      img.onerror = () => {
+                                        setNewSingerImageUrl(rawDataUrl);
                                         setIsUploadingSingerPhoto(false);
-                                      }
+                                      };
+                                      img.src = rawDataUrl;
                                     };
                                     reader.readAsDataURL(file);
                                   } catch {
@@ -2349,10 +2407,12 @@ export const AdminPanelModal: React.FC = () => {
 
                 <div className="grid grid-cols-1 gap-4">
                   {filteredSingers.map((singer) => {
-                    const singerTracks = getStrictArtistTracks(tracks, singer);
                     const isEditingPhoto = editingPhotoSingerId === singer.id;
                     const isEditingInfo = editingInfoSingerId === singer.id;
                     const isManagingSongs = managingSongsSingerId === singer.id;
+                    const singerTracks = isManagingSongs
+                      ? getStrictArtistTracks(tracks, singer)
+                      : tracksByArtistId.get(singer.id) || [];
 
                     return (
                       <div
@@ -2520,25 +2580,35 @@ export const AdminPanelModal: React.FC = () => {
                                         try {
                                           setIsUploadingEditPhoto(true);
                                           const reader = new FileReader();
-                                          reader.onload = async () => {
-                                            try {
-                                              const base64 = reader.result as string;
-                                              const res = await fetch('/api/upload-photo', {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ dataUrl: base64, filename: file.name }),
-                                              });
-                                              const json = await res.json();
-                                              if (json.success && json.url) {
-                                                setNewAvatarUrl(json.url);
-                                              } else {
-                                                setNewAvatarUrl(base64);
+                                          reader.onload = () => {
+                                            const rawDataUrl = reader.result as string;
+                                            const img = new Image();
+                                            img.onload = () => {
+                                              try {
+                                                const canvas = document.createElement('canvas');
+                                                const maxDim = 400;
+                                                const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+                                                canvas.width = Math.max(1, Math.round(img.width * scale));
+                                                canvas.height = Math.max(1, Math.round(img.height * scale));
+                                                const ctx = canvas.getContext('2d');
+                                                if (ctx) {
+                                                  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                                  const compressed = canvas.toDataURL('image/jpeg', 0.84);
+                                                  setNewAvatarUrl(compressed);
+                                                } else {
+                                                  setNewAvatarUrl(rawDataUrl);
+                                                }
+                                              } catch {
+                                                setNewAvatarUrl(rawDataUrl);
+                                              } finally {
+                                                setIsUploadingEditPhoto(false);
                                               }
-                                            } catch (err) {
-                                              console.error(err);
-                                            } finally {
+                                            };
+                                            img.onerror = () => {
+                                              setNewAvatarUrl(rawDataUrl);
                                               setIsUploadingEditPhoto(false);
-                                            }
+                                            };
+                                            img.src = rawDataUrl;
                                           };
                                           reader.readAsDataURL(file);
                                         } catch {
@@ -2559,7 +2629,7 @@ export const AdminPanelModal: React.FC = () => {
                                   type="text"
                                   value={newAvatarUrl}
                                   onChange={(e) => setNewAvatarUrl(e.target.value)}
-                                  placeholder="Paste new photo URL (https://... or /uploads/...)"
+                                  placeholder="Paste new photo URL (https://... or upload file)"
                                   className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-amber-400"
                                 />
                               </div>
@@ -2598,20 +2668,7 @@ export const AdminPanelModal: React.FC = () => {
                                 type="button"
                                 onClick={async () => {
                                   if (!newAvatarUrl.trim()) return;
-                                  let finalImg = newAvatarUrl.trim();
-                                  if (finalImg.startsWith('data:')) {
-                                    try {
-                                      const res = await fetch('/api/upload-photo', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ dataUrl: finalImg, filename: `singer-${singer.id}.jpg` }),
-                                      });
-                                      const json = await res.json();
-                                      if (json.success && json.url) {
-                                        finalImg = json.url;
-                                      }
-                                    } catch {}
-                                  }
+                                  const finalImg = newAvatarUrl.trim();
                                   updateArtist(singer.id, { imageUrl: finalImg });
                                   setEditingPhotoSingerId(null);
                                 }}

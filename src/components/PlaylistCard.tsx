@@ -27,8 +27,10 @@ export const PlaylistCard: React.FC<PlaylistCardProps> = React.memo(
 
     const cleanName = decodeHtmlEntities(playlist.name);
     const cleanDesc = decodeHtmlEntities(playlist.description);
-    const plSec = resolvePlaylistSection(playlist);
-    const plArtist = resolvePlaylistArtist(playlist, artists, tracks);
+    const plSec = playlist.section || resolvePlaylistSection(playlist);
+    const plArtist =
+      (playlist.artistId ? artists.find((a) => a.id === playlist.artistId) : undefined) ||
+      resolvePlaylistArtist(playlist, artists);
 
     const handleCardClick = () => {
       setActiveView(playlist.id as ActiveView);
@@ -39,11 +41,16 @@ export const PlaylistCard: React.FC<PlaylistCardProps> = React.memo(
       playPlaylist(playlist);
     };
 
-    const firstTrack =
-      playlist.trackIds
-        .map((id) => tracks.find((t) => t.id === id))
-        .find((t) => Boolean(t?.coverUrl)) ||
-      tracks.find((t) => playlist.trackIds.includes(t.id));
+    const firstId = playlist.trackIds[0];
+    const directYtVid =
+      firstId && firstId.startsWith('track-yt-pl-') && firstId.length > 12
+        ? firstId.slice('track-yt-pl-'.length)
+        : undefined;
+    const firstTrack = directYtVid
+      ? { coverUrl: `https://i.ytimg.com/vi/${directYtVid}/hqdefault.jpg` }
+      : firstId
+      ? tracks.find((t) => t.id === firstId)
+      : undefined;
 
     if (variant === 'horizontal') {
       return (

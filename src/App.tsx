@@ -10,7 +10,6 @@ import { TrackTable } from './components/TrackTable.tsx';
 import { ArtistCard } from './components/ArtistCard.tsx';
 import { BottomPlayer } from './components/BottomPlayer.tsx';
 import { QueueDrawer } from './components/QueueDrawer.tsx';
-import { LyricsModal } from './components/LyricsModal.tsx';
 import { CreatePlaylistModal } from './components/CreatePlaylistModal.tsx';
 import { EditPlaylistModal } from './components/EditPlaylistModal.tsx';
 import { AdminPanelModal } from './components/AdminPanelModal.tsx';
@@ -1361,9 +1360,6 @@ function MainContent() {
           </span>
         </button>
       </nav>
-
-      {/* Synchronized Lyrics Viewer Modal with Hindi Devanagari switch */}
-      <LyricsModal />
 
       {/* Create Playlist Modal */}
       <CreatePlaylistModal />

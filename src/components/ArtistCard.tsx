@@ -43,11 +43,20 @@ export const ArtistCard: React.FC<ArtistCardProps> = React.memo(({ artist, class
       {/* Circular Artist Image with Play overlay */}
       <div className="relative w-28 h-28 sm:w-32 sm:h-32 rounded-full overflow-hidden mb-3.5 shadow-xl border-2 border-slate-750 group-hover:border-emerald-400 transition-colors bg-slate-900">
         <img
+          key={artist.imageUrl}
           src={artist.imageUrl}
           alt={cleanName}
           loading="lazy"
           decoding="async"
           referrerPolicy="no-referrer"
+          onError={(e) => {
+            const target = e.currentTarget;
+            if (!target.dataset.fallbackApplied) {
+              target.dataset.fallbackApplied = 'true';
+              target.src =
+                'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?auto=format&fit=crop&w=600&q=80';
+            }
+          }}
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
         />
 

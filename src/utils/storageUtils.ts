@@ -245,21 +245,86 @@ export function validateCatalogBackup(data: unknown): {
 }
 
 export const SUPABASE_SQL_SETUP_SCRIPT = `-- Run this once in your Supabase Dashboard -> SQL Editor
+-- 1. Main Catalog Snapshot Table
 create table if not exists public.site_catalog (
   id text primary key,
   tracks jsonb not null default '[]'::jsonb,
   playlists jsonb not null default '[]'::jsonb,
+  artists jsonb not null default '[]'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.site_catalog
+  add column if not exists artists jsonb not null default '[]'::jsonb;
+
+-- 2. Individual Songs, Playlists, and Artists Tables (for Table Editor inspection & Realtime .on() listeners)
+create table if not exists public.songs (
+  id text primary key,
+  title text not null,
+  artist text not null,
+  section text,
+  youtube_id text,
+  data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.playlists (
+  id text primary key,
+  name text not null,
+  section text,
+  artist_name text,
+  data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.artists (
+  id text primary key,
+  name text not null,
+  language text,
+  role text,
+  data jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now()
 );
 
 alter table public.site_catalog enable row level security;
+alter table public.songs enable row level security;
+alter table public.playlists enable row level security;
+alter table public.artists enable row level security;
 
-create policy "Allow public read of site_catalog"
-  on public.site_catalog for select
-  using (true);
+drop policy if exists "Allow public read of site_catalog" on public.site_catalog;
+create policy "Allow public read of site_catalog" on public.site_catalog for select using (true);
+drop policy if exists "Allow service and anon upsert of site_catalog" on public.site_catalog;
+create policy "Allow service and anon upsert of site_catalog" on public.site_catalog for all using (true) with check (true);
 
-create policy "Allow service and anon upsert of site_catalog"
-  on public.site_catalog for all
-  using (true)
-  with check (true);`;
+drop policy if exists "Allow public access to songs" on public.songs;
+create policy "Allow public access to songs" on public.songs for all using (true) with check (true);
+
+drop policy if exists "Allow public access to playlists" on public.playlists;
+create policy "Allow public access to playlists" on public.playlists for all using (true) with check (true);
+
+drop policy if exists "Allow public access to artists" on public.artists;
+create policy "Allow public access to artists" on public.artists for all using (true) with check (true);
+
+-- 3. Enable Supabase Realtime for songs, playlists, artists, and site_catalog
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table public.site_catalog;
+  exception when others then null;
+  end;
+  begin
+    alter publication supabase_realtime add table public.songs;
+  exception when others then null;
+  end;
+  begin
+    alter publication supabase_realtime add table public.playlists;
+  exception when others then null;
+  end;
+  begin
+    alter publication supabase_realtime add table public.artists;
+  exception when others then null;
+  end;
+end $$;`;
+
+
 

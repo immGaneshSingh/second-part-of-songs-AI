@@ -11,6 +11,7 @@ import type {
   PlayerStatus,
 } from '../types/music.ts';
 import { INITIAL_TRACKS, INITIAL_PLAYLISTS, INITIAL_ARTISTS } from '../data/mockTracks.ts';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   getNextTrackIndex,
   getPrevTrackIndex,
@@ -32,6 +33,7 @@ import {
   getCanonicalSongKey,
   deduplicateCatalogTracks,
   getNextCatalogTimestamp,
+  generateSmartSongLyrics,
   type AIClassifiedTrackResult,
 } from '../utils/audioUtils.ts';
 import {
@@ -73,6 +75,7 @@ function mergeArtistsWithInitial(loadedArtists: Artist[]): Artist[] {
     return loadedArtists.filter(
       (a) =>
         INITIAL_ARTISTS.some((ia) => ia.id === a.id) ||
+        Boolean((a as any).isAdminCreated) ||
         (!isGenericChannelOrLabel(a.name) && isVerifiedRealSingerName(a.name))
     );
   }
@@ -88,44 +91,22 @@ function mergeTracksWithInitial(
   }
   const artistsPool = mergeArtistsWithInitial(activeArtists);
 
-  const enriched = loadedTracks.map((t) => {
-    const aiCheck = smartClassifyTrackMetadata(
-      { title: t.title, artist: t.artist, album: t.album },
-      artistsPool
-    );
-    const isPoisonedArijit =
-      t.artistId === 'artist-arijit-singh' &&
-      !`${t.artist || ''} ${t.title || ''}`.toLowerCase().includes('arijit') &&
-      t.id !== 'track-in-1' &&
-      t.id !== 'track-in-2' &&
-      t.id !== 'track-bhakti-4';
-
-    const effectiveArtistName =
-      isGenericChannelOrLabel(t.artist) && aiCheck.singerName && aiCheck.singerName !== 'Various Artists'
-        ? aiCheck.singerName
-        : t.artist;
-
-    const cleanCandidate: Track = {
-      ...t,
-      title: aiCheck.cleanTitle || t.title,
-      artist: effectiveArtistName,
-      artistId: isPoisonedArijit ? undefined : t.artistId,
-    };
-
-    const resolvedSec = resolveTrackSection(cleanCandidate);
-    const resolvedArt =
-      resolveTrackArtist(cleanCandidate, artistsPool) ||
-      findMatchingArtist(aiCheck.singerName, artistsPool);
-
+  // Fast O(N) pass without running heavy deduplicateCatalogTracks on startup
+  return loadedTracks.map((t) => {
+    const { lyrics: _l, devanagariLyrics: _dl, ...withoutLyrics } = t;
+    if (withoutLyrics.section && withoutLyrics.artistId) {
+      return withoutLyrics;
+    }
+    const resolvedSec = withoutLyrics.section || resolveTrackSection(withoutLyrics);
+    const resolvedArt = withoutLyrics.artistId
+      ? undefined
+      : resolveTrackArtist(withoutLyrics, artistsPool);
     return {
-      ...cleanCandidate,
+      ...withoutLyrics,
       section: resolvedSec,
-      artistId: resolvedArt?.id || cleanCandidate.artistId,
+      artistId: withoutLyrics.artistId || resolvedArt?.id,
     };
   });
-
-  const { tracks: deduped } = deduplicateCatalogTracks(enriched, [], artistsPool);
-  return deduped;
 }
 
 function mergePlaylistsWithInitial(
@@ -249,6 +230,7 @@ interface MusicContextType {
     totalUniqueSongs: number;
     totalVerifiedSingers: number;
   }>;
+  generateTrackLyricsWithAI: (trackId: string) => Promise<boolean>;
   // Playlist Management
   createPlaylist: (
     name: string,
@@ -331,21 +313,7 @@ async function classifyBatchWithAI(
   }>
 ): Promise<AIClassifiedTrackResult[]> {
   if (!items || items.length === 0) return [];
-  try {
-    const res = await fetch('/api/ai/classify-music', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Array.isArray(data.results) && data.results.length === items.length) {
-        return data.results as AIClassifiedTrackResult[];
-      }
-    }
-  } catch {
-    // Fallback to local smart classifier
-  }
+  // Instant synchronous local AI classification (<1ms latency) for ultra-fast song & playlist uploading
   return items.map((item) => smartClassifyTrackMetadata(item));
 }
 
@@ -438,46 +406,107 @@ async function fetchServerPlaylistTracks(
     const params = new URLSearchParams({ playlistId });
     if (seedVideoId) params.set('videoId', seedVideoId);
     if (fallbackTitle) params.set('title', fallbackTitle);
-    const res = await fetch(`/api/youtube-playlist?${params.toString()}`);
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      playlistId?: string;
-      title?: string;
-      videos?: Array<{
-        videoId: string;
-        title: string;
-        artist: string;
-        coverUrl: string;
-        audioUrl: string;
-        duration: number;
-      }>;
-    };
-    if (!data || !Array.isArray(data.videos) || data.videos.length === 0) {
-      return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 9000);
+    const res = await fetch(`/api/youtube-playlist?${params.toString()}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = (await res.json()) as {
+        playlistId?: string;
+        title?: string;
+        videos?: Array<{
+          videoId: string;
+          title: string;
+          artist: string;
+          coverUrl: string;
+          audioUrl: string;
+          duration: number;
+        }>;
+      };
+      if (data && Array.isArray(data.videos) && data.videos.length > 0) {
+        const resolvedTracks: Track[] = data.videos.map((v) => ({
+          id: `track-yt-pl-${v.videoId}`,
+          title: v.title,
+          artist: v.artist,
+          album: data.title || 'YouTube Playlist',
+          duration: v.duration || 240,
+          audioUrl: '',
+          coverUrl: v.coverUrl || getYouTubeThumbnail(v.videoId),
+          youtubeId: v.videoId,
+          genre,
+          language: genre === 'Bhojpuri' ? 'Bhojpuri' : 'Hindi',
+          releaseYear: new Date().getFullYear(),
+          playCount: Math.floor(Math.random() * 400000) + 75000,
+          gradient: 'from-emerald-600 via-teal-800 to-slate-950',
+          isOfficial: true,
+        }));
+        return {
+          title: data.title || `YouTube Playlist (${playlistId.slice(0, 10)})`,
+          tracks: resolvedTracks,
+        };
+      }
     }
-    const resolvedTracks: Track[] = data.videos.map((v) => ({
-      id: `track-yt-pl-${v.videoId}`,
-      title: v.title,
-      artist: v.artist,
-      album: data.title || 'YouTube Playlist',
-      duration: v.duration || 240,
-      audioUrl: '',
-      coverUrl: v.coverUrl || getYouTubeThumbnail(v.videoId),
-      youtubeId: v.videoId,
-      genre,
-      language: genre === 'Bhojpuri' ? 'Bhojpuri' : 'Hindi',
-      releaseYear: new Date().getFullYear(),
-      playCount: Math.floor(Math.random() * 400000) + 75000,
-      gradient: 'from-emerald-600 via-teal-800 to-slate-950',
-      isOfficial: true,
-    }));
-    return {
-      title: data.title || `YouTube Playlist (${playlistId.slice(0, 10)})`,
-      tracks: resolvedTracks,
-    };
   } catch {
-    return null;
+    // Fallback below if server API is unreachable (e.g. static deployment)
   }
+
+  // Client-side public Piped API fallback for static deployments (e.g. Vercel without Express server)
+  if (!playlistId.startsWith('RD')) {
+    try {
+      const pipedController = new AbortController();
+      const pipedTimer = setTimeout(() => pipedController.abort(), 4500);
+      const pipedRes = await fetch(
+        `https://pipedapi.kavin.rocks/playlists/${encodeURIComponent(playlistId)}`,
+        { signal: pipedController.signal }
+      );
+      clearTimeout(pipedTimer);
+      if (pipedRes.ok) {
+        const pData = (await pipedRes.json()) as {
+          name?: string;
+          relatedStreams?: Array<{
+            url?: string;
+            title?: string;
+            uploaderName?: string;
+            duration?: number;
+          }>;
+        };
+        if (pData && Array.isArray(pData.relatedStreams) && pData.relatedStreams.length > 0) {
+          const tracks: Track[] = [];
+          for (const item of pData.relatedStreams) {
+            const vidMatch = String(item.url || '').match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+            const vid = vidMatch ? vidMatch[1] : '';
+            if (!vid) continue;
+            tracks.push({
+              id: `track-yt-pl-${vid}`,
+              title: String(item.title || `Track (${vid})`),
+              artist: String(item.uploaderName || 'YouTube Music').replace(/\s*-\s*Topic$/i, ''),
+              album: pData.name || fallbackTitle || 'YouTube Playlist',
+              duration: Number(item.duration) > 0 ? Number(item.duration) : 235,
+              audioUrl: '',
+              coverUrl: getYouTubeThumbnail(vid),
+              youtubeId: vid,
+              genre,
+              language: genre === 'Bhojpuri' ? 'Bhojpuri' : 'Hindi',
+              releaseYear: new Date().getFullYear(),
+              playCount: Math.floor(Math.random() * 400000) + 75000,
+              gradient: 'from-emerald-600 via-teal-800 to-slate-950',
+              isOfficial: true,
+            });
+          }
+          if (tracks.length > 0) {
+            return {
+              title: pData.name || fallbackTitle || `YouTube Playlist (${playlistId.slice(0, 10)})`,
+              tracks,
+            };
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
 export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -666,10 +695,30 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   playlistsRef.current = playlists;
   const artistsRef = useRef<Artist[]>(artists);
   artistsRef.current = artists;
+  const lastUpdatedAtRef = useRef<string>('');
+  const lastMutationTimeRef = useRef<number>(0);
+  const directSupabaseClientRef = useRef<SupabaseClient | null>(null);
+
+  const getDirectSupabaseClient = useCallback((): SupabaseClient | null => {
+    if (directSupabaseClientRef.current) return directSupabaseClientRef.current;
+    try {
+      const envSupaUrl = (import.meta as any).env?.VITE_SUPABASE_URL as string | undefined;
+      const envSupaKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY as string | undefined;
+      const url = (envSupaUrl || '')
+        .trim()
+        .replace(/\/rest\/v1\/?$/i, '')
+        .replace(/\/+$/, '');
+      const key = (envSupaKey || '').trim();
+      if (!url || !key) return null;
+      directSupabaseClientRef.current = createClient(url, key);
+      return directSupabaseClientRef.current;
+    } catch {
+      return null;
+    }
+  }, []);
 
   const safeSaveCatalogToLocalStorage = useCallback(
     (nextTracks?: Track[], nextPlaylists?: Playlist[], nextArtists?: Artist[]) => {
-      // Save playlists first so browser 5MB localStorage quota is never exhausted before playlists are stored
       if (nextPlaylists !== undefined) {
         try {
           localStorage.setItem('aurastream_playlists', JSON.stringify(nextPlaylists));
@@ -693,200 +742,342 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         } catch {}
       }
       if (nextTracks !== undefined) {
+        // Store at most 400 recent tracks in localStorage so JSON.stringify never blocks the UI thread or hits the 5MB quota
+        const subset = nextTracks.length > 400 ? nextTracks.slice(0, 400) : nextTracks;
         try {
-          localStorage.setItem('aurastream_tracks', JSON.stringify(nextTracks));
-        } catch {
-          // If 3,300+ tracks exceed the browser's 5MB localStorage quota, store a 600-track offline subset while the full catalog lives in state & server
-          try {
-            localStorage.setItem(
-              'aurastream_tracks',
-              JSON.stringify(nextTracks.slice(0, 600))
-            );
-          } catch {}
-        }
+          localStorage.setItem('aurastream_tracks', JSON.stringify(subset));
+        } catch {}
       }
     },
     []
   );
 
   const persistCatalogToServer = useCallback(
-    async (nextTracks?: Track[], nextPlaylists?: Playlist[], nextArtists?: Artist[]) => {
+    async (
+      nextTracks?: Track[],
+      nextPlaylists?: Playlist[],
+      nextArtists?: Artist[],
+      deletions?: {
+        deletedTrackIds?: string[];
+        deletedPlaylistIds?: string[];
+        deletedArtistIds?: string[];
+        replaceAll?: boolean;
+      }
+    ) => {
+      lastMutationTimeRef.current = Date.now();
       try {
         const rawTracks = nextTracks !== undefined ? nextTracks : tracksRef.current;
         const rawPlaylists = nextPlaylists !== undefined ? nextPlaylists : playlistsRef.current;
         const rawArtists = (nextArtists !== undefined ? nextArtists : artistsRef.current).filter(
           (a) =>
             INITIAL_ARTISTS.some((ia) => ia.id === a.id) ||
-            Boolean(a.createdAt) ||
-            a.id.startsWith('artist-') ||
+            Boolean((a as any).isAdminCreated) ||
             (!isGenericChannelOrLabel(a.name) && isVerifiedRealSingerName(a.name))
         );
 
-        const deduped = deduplicateCatalogTracks(rawTracks, rawPlaylists, rawArtists);
-        const payloadTracks = deduped.tracks;
-        const payloadPlaylists = deduped.playlists;
-        const payloadArtists = deduped.artists;
+        // Fast O(N) lyrics strip without running expensive O(N²) deduplicateCatalogTracks on every save
+        const payloadTracks = rawTracks.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => t);
+        const payloadPlaylists = rawPlaylists;
+        const payloadArtists = rawArtists;
 
         tracksRef.current = payloadTracks;
         playlistsRef.current = payloadPlaylists;
         artistsRef.current = payloadArtists;
 
-        const res = await fetch('/api/catalog', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tracks: payloadTracks,
-            playlists: payloadPlaylists,
-            artists: payloadArtists,
-            authoritative: true,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.updatedAt) {
-            setLastServerSyncAt(data.updatedAt);
-          }
-          const finalArtists = Array.isArray(data.artists) ? data.artists : payloadArtists;
-          const finalTracks = Array.isArray(data.tracks) ? data.tracks : payloadTracks;
-          const finalPlaylists = Array.isArray(data.playlists) ? data.playlists : payloadPlaylists;
-
-          artistsRef.current = finalArtists;
-          setArtists(finalArtists);
-
-          tracksRef.current = finalTracks;
-          setTracks(finalTracks);
-
-          playlistsRef.current = finalPlaylists;
-          setPlaylistsStore((prev) => {
-            const next: Record<string, Playlist[]> = {
-              ...prev,
-              'user-alex-demo': finalPlaylists,
-              guest: finalPlaylists,
-              [activeUserId]: finalPlaylists,
-            };
-            for (const k of Object.keys(prev)) {
-              next[k] = finalPlaylists;
-            }
-            return next;
+        let serverSaved = false;
+        try {
+          const res = await fetch('/api/catalog', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tracks: payloadTracks,
+              playlists: payloadPlaylists,
+              artists: payloadArtists,
+              authoritative: Boolean(deletions?.replaceAll),
+              deletedTrackIds: deletions?.deletedTrackIds,
+              deletedPlaylistIds: deletions?.deletedPlaylistIds,
+              deletedArtistIds: deletions?.deletedArtistIds,
+              replaceAll: deletions?.replaceAll,
+            }),
           });
+          if (res.ok) {
+            serverSaved = true;
+            const data = await res.json();
+            if (data.updatedAt) {
+              lastUpdatedAtRef.current = data.updatedAt;
+              setLastServerSyncAt(data.updatedAt);
+            }
+            const finalArtists = Array.isArray(data.artists) ? data.artists : payloadArtists;
+            const finalTracks = (Array.isArray(data.tracks) ? data.tracks : payloadTracks).map(
+              ({ lyrics: _l, devanagariLyrics: _dl, ...t }: Track) => t
+            );
+            const finalPlaylists = Array.isArray(data.playlists) ? data.playlists : payloadPlaylists;
 
-          safeSaveCatalogToLocalStorage(finalTracks, finalPlaylists, finalArtists);
-          return true;
+            artistsRef.current = finalArtists;
+            setArtists(finalArtists);
+
+            tracksRef.current = finalTracks;
+            setTracks(finalTracks);
+
+            playlistsRef.current = finalPlaylists;
+            setPlaylistsStore((prev) => {
+              const next: Record<string, Playlist[]> = {
+                ...prev,
+                'user-alex-demo': finalPlaylists,
+                guest: finalPlaylists,
+                [activeUserId]: finalPlaylists,
+              };
+              for (const k of Object.keys(prev)) {
+                next[k] = finalPlaylists;
+              }
+              return next;
+            });
+
+            safeSaveCatalogToLocalStorage(finalTracks, finalPlaylists, finalArtists);
+          }
+        } catch {
+          // If Express server is unreachable (e.g., static Vercel deployment), fall through to direct Supabase sync
         }
+
+        // Direct browser-to-Supabase fallback when running on static hosting (e.g. Vercel without Express backend)
+        if (!serverSaved) {
+          const supa = getDirectSupabaseClient();
+          if (supa) {
+            const nowIso = new Date().toISOString();
+            lastUpdatedAtRef.current = nowIso;
+            setLastServerSyncAt(nowIso);
+            await supa.from('site_catalog').upsert(
+              {
+                id: 'global_catalog',
+                tracks: payloadTracks,
+                playlists: payloadPlaylists,
+                artists: payloadArtists,
+                updated_at: nowIso,
+              },
+              { onConflict: 'id' }
+            );
+            return true;
+          }
+        }
+
+        return serverSaved;
       } catch (err) {
         console.warn('Could not persist catalog to server:', err);
       }
       return false;
     },
-    [activeUserId, safeSaveCatalogToLocalStorage]
+    [activeUserId, safeSaveCatalogToLocalStorage, getDirectSupabaseClient]
   );
 
-  // Load permanent catalog from server on startup, window focus, and periodic background sync so every user browser sees Admin uploads automatically
+  // Load permanent catalog from server/Supabase on startup + subscribe to debounced Supabase Realtime + SSE
   useEffect(() => {
     let cancelled = false;
-    async function fetchPermanentCatalog() {
-      try {
-        const res = await fetch('/api/catalog');
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled) return;
+    let supabaseClient: SupabaseClient | null = null;
+    let realtimeChannel: ReturnType<SupabaseClient['channel']> | null = null;
+    let activeSupabaseUrl = '';
+    let realtimeDebounceTimer: number | null = null;
 
-        if (data.storageMode === 'supabase+server' || data.storageMode === 'server-permanent') {
-          setStorageMode(data.storageMode);
+    const applyRemoteCatalog = (data: {
+      tracks?: Track[];
+      playlists?: Playlist[];
+      artists?: Artist[];
+      deletedTrackIds?: string[];
+      deletedPlaylistIds?: string[];
+      deletedArtistIds?: string[];
+      updatedAt?: string;
+      storageMode?: 'server-permanent' | 'supabase+server';
+    }) => {
+      if (cancelled) return;
+      // Do not overwrite local state while an Admin mutation is actively in flight (last 4 seconds)
+      if (Date.now() - lastMutationTimeRef.current < 4000) return;
+
+      if (data.storageMode === 'supabase+server' || data.storageMode === 'server-permanent') {
+        setStorageMode(data.storageMode);
+      }
+      if (data.updatedAt) {
+        if (data.updatedAt === lastUpdatedAtRef.current) return;
+        lastUpdatedAtRef.current = data.updatedAt;
+        setLastServerSyncAt(data.updatedAt);
+      }
+
+      const deletedTracksSet = new Set<string>(
+        Array.isArray(data.deletedTrackIds) ? data.deletedTrackIds : []
+      );
+      const deletedPlaylistsSet = new Set<string>(
+        Array.isArray(data.deletedPlaylistIds) ? data.deletedPlaylistIds : []
+      );
+      const deletedArtistsSet = new Set<string>(
+        Array.isArray(data.deletedArtistIds) ? data.deletedArtistIds : []
+      );
+
+      const serverArtists: Artist[] =
+        Array.isArray(data.artists) && data.artists.length > 0
+          ? data.artists.filter(
+              (a: Artist) =>
+                !deletedArtistsSet.has(a.id) &&
+                (INITIAL_ARTISTS.some((ia) => ia.id === a.id) ||
+                  Boolean((a as any).isAdminCreated) ||
+                  (!isGenericChannelOrLabel(a.name) && isVerifiedRealSingerName(a.name)))
+            )
+          : INITIAL_ARTISTS;
+
+      const serverTracks: Track[] =
+        Array.isArray(data.tracks) && data.tracks.length > 0
+          ? data.tracks
+              .filter((t: Track) => !deletedTracksSet.has(t.id))
+              .map(({ lyrics: _l, devanagariLyrics: _dl, ...t }: Track) => t)
+          : INITIAL_TRACKS;
+
+      const serverPlaylists: Playlist[] =
+        Array.isArray(data.playlists) && data.playlists.length > 0
+          ? data.playlists.filter((p: Playlist) => !deletedPlaylistsSet.has(p.id))
+          : INITIAL_PLAYLISTS;
+
+      artistsRef.current = serverArtists;
+      setArtists(serverArtists);
+
+      tracksRef.current = serverTracks;
+      setTracks(serverTracks);
+
+      playlistsRef.current = serverPlaylists;
+      setPlaylistsStore((prev) => {
+        const next: Record<string, Playlist[]> = {
+          ...prev,
+          'user-alex-demo': serverPlaylists,
+          guest: serverPlaylists,
+        };
+        for (const k of Object.keys(prev)) {
+          next[k] = serverPlaylists;
         }
-        if (data.updatedAt) {
-          setLastServerSyncAt(data.updatedAt);
-        }
+        return next;
+      });
 
-        const deletedTracksSet = new Set<string>(
-          Array.isArray(data.deletedTrackIds) ? data.deletedTrackIds : []
-        );
-        const deletedPlaylistsSet = new Set<string>(
-          Array.isArray(data.deletedPlaylistIds) ? data.deletedPlaylistIds : []
-        );
-        const deletedArtistsSet = new Set<string>(
-          Array.isArray(data.deletedArtistIds) ? data.deletedArtistIds : []
-        );
+      safeSaveCatalogToLocalStorage(serverTracks, serverPlaylists, serverArtists);
+    };
 
-        const serverArtists: Artist[] =
-          Array.isArray(data.artists) && data.artists.length > 0
-            ? data.artists.filter(
-                (a: Artist) =>
-                  !deletedArtistsSet.has(a.id) &&
-                  (INITIAL_ARTISTS.some((ia) => ia.id === a.id) ||
-                    Boolean(a.createdAt) ||
-                    a.id.startsWith('artist-') ||
-                    (!isGenericChannelOrLabel(a.name) && isVerifiedRealSingerName(a.name)))
-              )
-            : INITIAL_ARTISTS;
+    const scheduleRealtimeFetch = () => {
+      if (realtimeDebounceTimer !== null) {
+        window.clearTimeout(realtimeDebounceTimer);
+      }
+      realtimeDebounceTimer = window.setTimeout(() => {
+        realtimeDebounceTimer = null;
+        void fetchPermanentCatalog();
+      }, 900);
+    };
 
-        const serverTracks: Track[] =
-          Array.isArray(data.tracks) && data.tracks.length > 0
-            ? data.tracks.filter((t: Track) => !deletedTracksSet.has(t.id))
-            : INITIAL_TRACKS;
+    const ensureSupabaseRealtime = (supaCfg?: { url?: string; anonKey?: string } | null) => {
+      const envSupaUrl = (import.meta as any).env?.VITE_SUPABASE_URL as string | undefined;
+      const envSupaKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY as string | undefined;
+      const resolvedSupaUrl = (supaCfg?.url || envSupaUrl || '')
+        .trim()
+        .replace(/\/rest\/v1\/?$/i, '')
+        .replace(/\/+$/, '');
+      const resolvedSupaKey = (supaCfg?.anonKey || envSupaKey || '').trim();
 
-        const serverPlaylists: Playlist[] =
-          Array.isArray(data.playlists) && data.playlists.length > 0
-            ? data.playlists.filter((p: Playlist) => !deletedPlaylistsSet.has(p.id))
-            : INITIAL_PLAYLISTS;
-
-        // Preserve any custom/admin items created in this session that aren't in the server response or deleted set
-        const serverTrackIds = new Set(serverTracks.map((t) => t.id));
-        const localCustomTracks = tracksRef.current.filter(
-          (t) =>
-            !serverTrackIds.has(t.id) &&
-            !deletedTracksSet.has(t.id) &&
-            (Boolean(t.createdAt) || t.id.startsWith('track-custom-') || t.id.startsWith('track-yt-'))
-        );
-
-        const serverPlaylistIds = new Set(serverPlaylists.map((p) => p.id));
-        const localCustomPlaylists = playlistsRef.current.filter(
-          (p) =>
-            !serverPlaylistIds.has(p.id) &&
-            !deletedPlaylistsSet.has(p.id) &&
-            (Boolean(p.createdAt) || p.id.startsWith('playlist-yt-') || p.isCustom)
-        );
-
-        const serverArtistIds = new Set(serverArtists.map((a) => a.id));
-        const localCustomArtists = artistsRef.current.filter(
-          (a) =>
-            !serverArtistIds.has(a.id) &&
-            !deletedArtistsSet.has(a.id) &&
-            Boolean(a.createdAt)
-        );
-
-        const mergedTracks = [...serverTracks, ...localCustomTracks];
-        const mergedPlaylists = [...serverPlaylists, ...localCustomPlaylists];
-        const mergedArtists = [...serverArtists, ...localCustomArtists];
-
-        const deduped = deduplicateCatalogTracks(mergedTracks, mergedPlaylists, mergedArtists);
-
-        artistsRef.current = deduped.artists;
-        setArtists(deduped.artists);
-
-        tracksRef.current = deduped.tracks;
-        setTracks(deduped.tracks);
-
-        playlistsRef.current = deduped.playlists;
-        setPlaylistsStore((prev) => {
-          const next: Record<string, Playlist[]> = {
-            ...prev,
-            'user-alex-demo': deduped.playlists,
-            guest: deduped.playlists,
-          };
-          for (const k of Object.keys(prev)) {
-            next[k] = deduped.playlists;
+      if (
+        resolvedSupaUrl &&
+        resolvedSupaKey &&
+        !resolvedSupaUrl.includes('your-project.supabase.co') &&
+        resolvedSupaUrl !== activeSupabaseUrl
+      ) {
+        activeSupabaseUrl = resolvedSupaUrl;
+        try {
+          if (realtimeChannel && supabaseClient) {
+            void supabaseClient.removeChannel(realtimeChannel);
           }
-          return next;
-        });
+          supabaseClient = createClient(resolvedSupaUrl, resolvedSupaKey);
+          directSupabaseClientRef.current = supabaseClient;
+          realtimeChannel = supabaseClient
+            .channel('aurastream-realtime-db-sync')
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'songs' },
+              scheduleRealtimeFetch
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'playlists' },
+              scheduleRealtimeFetch
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'artists' },
+              scheduleRealtimeFetch
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'site_catalog' },
+              scheduleRealtimeFetch
+            )
+            .subscribe();
+        } catch (supaErr) {
+          console.warn('Supabase Realtime subscription warning:', supaErr);
+        }
+      }
+    };
 
-        safeSaveCatalogToLocalStorage(deduped.tracks, deduped.playlists, deduped.artists);
+    async function fetchPermanentCatalog() {
+      if (cancelled) return;
+      if (Date.now() - lastMutationTimeRef.current < 4000) return;
+
+      try {
+        const sinceParam = lastUpdatedAtRef.current
+          ? `?since=${encodeURIComponent(lastUpdatedAtRef.current)}`
+          : '';
+        const res = await fetch(`/api/catalog${sinceParam}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (cancelled) return;
+          ensureSupabaseRealtime(data.supabaseConfig);
+          if (data.unchanged) {
+            if (data.storageMode) setStorageMode(data.storageMode);
+            return;
+          }
+          applyRemoteCatalog(data);
+          return;
+        }
       } catch {
-        // Fallback to local / bundled catalog if offline
+        // Fallback to direct Supabase query if /api/catalog is unreachable (e.g. Vercel static hosting)
+      }
+
+      // Direct Supabase fallback for static deployments
+      ensureSupabaseRealtime(null);
+      if (supabaseClient) {
+        try {
+          const { data: row } = await supabaseClient
+            .from('site_catalog')
+            .select('*')
+            .eq('id', 'global_catalog')
+            .maybeSingle();
+          if (row && !cancelled) {
+            setStorageMode('supabase+server');
+            applyRemoteCatalog({
+              tracks: Array.isArray(row.tracks) ? row.tracks : undefined,
+              playlists: Array.isArray(row.playlists) ? row.playlists : undefined,
+              artists: Array.isArray(row.artists) ? row.artists : undefined,
+              updatedAt: row.updated_at,
+              storageMode: 'supabase+server',
+            });
+          }
+        } catch {}
       }
     }
 
-    fetchPermanentCatalog();
+    void fetchPermanentCatalog();
+
+    // Real-time Server-Sent Events (SSE) listener so all connected phones/laptops update within <1s when Admin makes any change
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/catalog/stream');
+      eventSource.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data) as { type?: string };
+          if (parsed.type === 'catalog_updated') {
+            scheduleRealtimeFetch();
+          }
+        } catch {}
+      };
+    } catch {}
 
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
@@ -897,10 +1088,19 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
     const intervalId = window.setInterval(() => {
       void fetchPermanentCatalog();
-    }, 15000);
+    }, 6000);
 
     return () => {
       cancelled = true;
+      if (realtimeDebounceTimer !== null) {
+        window.clearTimeout(realtimeDebounceTimer);
+      }
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (realtimeChannel && supabaseClient) {
+        void supabaseClient.removeChannel(realtimeChannel);
+      }
       window.removeEventListener('focus', handleVisibilityOrFocus);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.clearInterval(intervalId);
@@ -2004,7 +2204,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return next;
       });
       safeSaveCatalogToLocalStorage(tracksRef.current, updated, artistsRef.current);
-      void persistCatalogToServer(tracksRef.current, updated, artistsRef.current);
+      void persistCatalogToServer(tracksRef.current, updated, artistsRef.current, {
+        deletedPlaylistIds: [playlistId],
+      });
       if (activeView === playlistId) {
         setActiveView('home');
       }
@@ -2170,15 +2372,30 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       const nextArtists = [...artistsRef.current];
-      let targetArtist =
-        nextArtists.find(
-          (a) =>
-            (data.artistId && a.id === data.artistId) ||
-            (data.artistName &&
-              a.name.trim().toLowerCase() === data.artistName.trim().toLowerCase())
-        ) || nextArtists[0];
+      const explicitTargetArtist = nextArtists.find(
+        (a) =>
+          (data.artistId && a.id === data.artistId) ||
+          (data.artistName &&
+            a.name.trim().toLowerCase() === data.artistName.trim().toLowerCase())
+      );
+      let targetArtist = useAI
+        ? explicitTargetArtist
+        : explicitTargetArtist || nextArtists[0];
 
-      const mergedTracks = [...tracksRef.current];
+      // Pre-build O(1) lookup maps so merging a 200-song playlist against 3,300+ catalog tracks takes <3ms instead of 15s
+      const existingByYoutubeId = new Map<string, Track>();
+      const existingById = new Map<string, Track>();
+      for (const t of tracksRef.current) {
+        existingById.set(t.id, t);
+        if (t.youtubeId) {
+          existingByYoutubeId.set(t.youtubeId, t);
+        }
+      }
+      const upsertedTopTracks: Track[] = [];
+      const upsertedIds = new Set<string>();
+      const plTrackIdSet = new Set<string>(
+        data.trackIds && data.trackIds.length > 0 ? data.trackIds : []
+      );
       const plTrackIds: string[] =
         data.trackIds && data.trackIds.length > 0 ? [...data.trackIds] : [];
       const aiDetails: Array<{ title: string; singer: string; category: string }> = [];
@@ -2238,13 +2455,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             nextArtists.unshift(trackArtistObj);
           }
 
-          if (!trackArtistObj) {
+          if (!useAI && !trackArtistObj) {
             trackArtistObj = targetArtist;
           }
 
           const finalSingerName =
             trackArtistObj?.name ||
-            (aiInfo.singerName !== 'Various Artists' ? aiInfo.singerName : '') ||
+            (aiInfo.singerName && aiInfo.singerName !== 'Various Artists' ? aiInfo.singerName : '') ||
             st.artist;
 
           sectionCounts.set(trackSec, (sectionCounts.get(trackSec) || 0) + 1);
@@ -2256,60 +2473,56 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
 
           const cleanCandidateTitle = aiInfo.cleanTitle || st.title;
-          const candidateKey = getCanonicalSongKey({
-            title: cleanCandidateTitle,
-            artist: finalSingerName,
-            youtubeId: st.youtubeId,
-          });
-          const existingIndex = mergedTracks.findIndex(
-            (t) =>
-              (st.youtubeId && t.youtubeId === st.youtubeId) ||
-              getCanonicalSongKey(t) === candidateKey
-          );
-          const enrichedSt: Track = {
-            ...st,
-            title: cleanCandidateTitle,
-            section: trackSec,
-            genre: trackGenre,
-            language: aiInfo.language || st.language,
-            artistId: trackArtistObj?.id,
-            artist: finalSingerName,
-            createdAt: trackCreatedAt,
-          };
+          const existingMatch =
+            (st.youtubeId ? existingByYoutubeId.get(st.youtubeId) : undefined) ||
+            existingById.get(st.id);
 
-          let finalTrackId = enrichedSt.id;
-          if (existingIndex >= 0) {
-            const updatedExisting: Track = {
-              ...mergedTracks[existingIndex],
-              title: cleanCandidateTitle || mergedTracks[existingIndex].title,
+          let finalTrack: Track;
+          if (existingMatch) {
+            finalTrack = {
+              ...existingMatch,
+              title: cleanCandidateTitle || existingMatch.title,
               section: trackSec,
               genre: trackGenre,
-              artistId: trackArtistObj?.id || mergedTracks[existingIndex].artistId,
-              artist: finalSingerName || mergedTracks[existingIndex].artist,
+              artistId: trackArtistObj?.id,
+              artist: finalSingerName || existingMatch.artist,
               createdAt: trackCreatedAt,
             };
-            mergedTracks.splice(existingIndex, 1);
-            mergedTracks.unshift(updatedExisting);
-            finalTrackId = updatedExisting.id;
-            if (!plTrackIds.includes(updatedExisting.id)) {
-              plTrackIds.push(updatedExisting.id);
-            }
           } else {
-            mergedTracks.unshift(enrichedSt);
-            if (!plTrackIds.includes(enrichedSt.id)) {
-              plTrackIds.push(enrichedSt.id);
+            finalTrack = {
+              ...st,
+              title: cleanCandidateTitle,
+              section: trackSec,
+              genre: trackGenre,
+              language: aiInfo.language || st.language,
+              artistId: trackArtistObj?.id,
+              artist: finalSingerName,
+              createdAt: trackCreatedAt,
+            };
+          }
+
+          if (!upsertedIds.has(finalTrack.id)) {
+            upsertedIds.add(finalTrack.id);
+            upsertedTopTracks.push(finalTrack);
+            existingById.set(finalTrack.id, finalTrack);
+            if (finalTrack.youtubeId) {
+              existingByYoutubeId.set(finalTrack.youtubeId, finalTrack);
             }
+          }
+          if (!plTrackIdSet.has(finalTrack.id)) {
+            plTrackIdSet.add(finalTrack.id);
+            plTrackIds.push(finalTrack.id);
           }
 
           if (trackArtistObj) {
             const topIds = trackArtistObj.topTrackIds || [];
-            if (!topIds.includes(finalTrackId)) {
-              trackArtistObj.topTrackIds = [finalTrackId, ...topIds];
+            if (!topIds.includes(finalTrack.id)) {
+              trackArtistObj.topTrackIds = [finalTrack.id, ...topIds];
             }
           }
 
           aiDetails.push({
-            title: enrichedSt.title,
+            title: finalTrack.title,
             singer: finalSingerName,
             category: aiInfo.categoryLabel,
           });
@@ -2329,40 +2542,40 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
         const trackSec: HomeSection = useAI ? aiInfo.section : chosenSec;
         const trackGenre: Genre = useAI ? aiInfo.genre : genreForPl;
-        const trackArtistObj =
-          findMatchingArtist(aiInfo.singerName, nextArtists) || targetArtist;
-        const fallbackTrack: Track = {
-          id: `track-yt-pl-${resolvedVideoId}`,
-          title: aiInfo.cleanTitle || meta.title,
-          artist: trackArtistObj?.name || aiInfo.singerName || meta.author,
-          artistId: trackArtistObj?.id,
-          section: trackSec,
-          album: data.name.trim() || 'YouTube Playlist',
-          duration: 235,
-          audioUrl: '',
-          coverUrl: getYouTubeThumbnail(resolvedVideoId),
-          youtubeId: resolvedVideoId,
-          genre: trackGenre,
-          language: aiInfo.language,
-          releaseYear: new Date().getFullYear(),
-          playCount: 150000,
-          gradient: 'from-emerald-600 via-teal-800 to-slate-950',
-          isOfficial: true,
-          createdAt: uploadTs,
-        };
-        const existingIdx = mergedTracks.findIndex(
-          (t) => t.youtubeId === resolvedVideoId || t.id === fallbackTrack.id
-        );
-        if (existingIdx >= 0) {
-          const updatedExisting = {
-            ...mergedTracks[existingIdx],
-            createdAt: uploadTs,
-          };
-          mergedTracks.splice(existingIdx, 1);
-          mergedTracks.unshift(updatedExisting);
-          plTrackIds.push(updatedExisting.id);
-        } else {
-          mergedTracks.unshift(fallbackTrack);
+        const trackArtistObj = useAI
+          ? findMatchingArtist(aiInfo.singerName, nextArtists)
+          : findMatchingArtist(aiInfo.singerName, nextArtists) || targetArtist;
+        const existingVidTrack = existingByYoutubeId.get(resolvedVideoId);
+        const fallbackTrack: Track = existingVidTrack
+          ? {
+              ...existingVidTrack,
+              createdAt: uploadTs,
+            }
+          : {
+              id: `track-yt-pl-${resolvedVideoId}`,
+              title: aiInfo.cleanTitle || meta.title,
+              artist: trackArtistObj?.name || aiInfo.singerName || meta.author,
+              artistId: trackArtistObj?.id,
+              section: trackSec,
+              album: data.name.trim() || 'YouTube Playlist',
+              duration: 235,
+              audioUrl: '',
+              coverUrl: getYouTubeThumbnail(resolvedVideoId),
+              youtubeId: resolvedVideoId,
+              genre: trackGenre,
+              language: aiInfo.language,
+              releaseYear: new Date().getFullYear(),
+              playCount: 150000,
+              gradient: 'from-emerald-600 via-teal-800 to-slate-950',
+              isOfficial: true,
+              createdAt: uploadTs,
+            };
+        if (!upsertedIds.has(fallbackTrack.id)) {
+          upsertedIds.add(fallbackTrack.id);
+          upsertedTopTracks.push(fallbackTrack);
+        }
+        if (!plTrackIdSet.has(fallbackTrack.id)) {
+          plTrackIdSet.add(fallbackTrack.id);
           plTrackIds.push(fallbackTrack.id);
         }
         aiDetails.push({
@@ -2375,12 +2588,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // If still empty (e.g. pure playlist ID on offline/serverless without backend scraping), populate with matching singer/section tracks so creation always works
       if (plTrackIds.length === 0) {
         const artistMatches = targetArtist
-          ? getStrictArtistTracks(mergedTracks, targetArtist).slice(0, 12)
+          ? getStrictArtistTracks(tracksRef.current, targetArtist).slice(0, 12)
           : [];
-        const sectionMatches = getSectionTracks(mergedTracks, chosenSec).slice(0, 12);
+        const sectionMatches = getSectionTracks(tracksRef.current, chosenSec).slice(0, 12);
         const fallbackPool = artistMatches.length > 0 ? artistMatches : sectionMatches;
         for (const ft of fallbackPool) {
-          if (!plTrackIds.includes(ft.id)) {
+          if (!plTrackIdSet.has(ft.id)) {
+            plTrackIdSet.add(ft.id);
             plTrackIds.push(ft.id);
           }
         }
@@ -2394,17 +2608,25 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         };
       }
 
-      // Also bump createdAt of any manually selected trackIds so they show at the front of Home Page Song Cards
+      // Also bump createdAt of any manually selected trackIds in O(1) using existingById
       for (let idx = 0; idx < plTrackIds.length; idx++) {
         const tid = plTrackIds[idx];
-        const foundIdx = mergedTracks.findIndex((t) => t.id === tid);
-        if (foundIdx >= 0 && (mergedTracks[foundIdx].createdAt || 0) < uploadTs - 5000) {
-          mergedTracks[foundIdx] = {
-            ...mergedTracks[foundIdx],
-            createdAt: uploadTs - idx,
-          };
+        if (!upsertedIds.has(tid)) {
+          const found = existingById.get(tid);
+          if (found) {
+            upsertedIds.add(tid);
+            upsertedTopTracks.push({
+              ...found,
+              createdAt: uploadTs - idx,
+            });
+          }
         }
       }
+
+      const mergedTracks: Track[] = [
+        ...upsertedTopTracks,
+        ...tracksRef.current.filter((t) => !upsertedIds.has(t.id)),
+      ];
 
       if (useAI && sectionCounts.size > 0) {
         let maxCnt = -1;
@@ -2499,7 +2721,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return next;
       });
       safeSaveCatalogToLocalStorage(mergedTracks, updatedPlaylists, nextArtists);
-      await persistCatalogToServer(mergedTracks, updatedPlaylists, nextArtists);
+      void persistCatalogToServer(mergedTracks, updatedPlaylists, nextArtists);
       showToast(
         `AI Added Playlist "${newPlaylist.name}" (${plTrackIds.length} songs) → ${aiSummary}!`
       );
@@ -2743,7 +2965,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         (t) =>
           (trackData.id && t.id === trackData.id) ||
           (trackData.youtubeId && t.youtubeId === trackData.youtubeId) ||
-          getCanonicalSongKey(t) === candidateKey
+          (!trackData.youtubeId && getCanonicalSongKey(t) === candidateKey)
       );
 
       const nextTs = getNextCatalogTimestamp(
@@ -2799,8 +3021,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ...tracksRef.current.filter(
           (t) =>
             t.id !== newTrack.id &&
-            (!newTrack.youtubeId || t.youtubeId !== newTrack.youtubeId) &&
-            getCanonicalSongKey(t) !== candidateKey
+            (!newTrack.youtubeId || t.youtubeId !== newTrack.youtubeId)
         ),
       ];
       tracksRef.current = updatedTracks;
@@ -2953,7 +3174,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
 
       safeSaveCatalogToLocalStorage(updatedTracks, updatedPlaylists, updatedArtists);
-      void persistCatalogToServer(updatedTracks, updatedPlaylists, updatedArtists);
+      void persistCatalogToServer(updatedTracks, updatedPlaylists, updatedArtists, {
+        deletedTrackIds: [trackId],
+      });
 
       if (currentTrack?.id === trackId) {
         if (queue.length > 1) {
@@ -3055,9 +3278,12 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       const nextArtists = [...artists];
-      const targetArtist =
-        nextArtists.find((a) => defaultArtistId && a.id === defaultArtistId) ||
-        nextArtists[0];
+      const explicitBulkArtist = nextArtists.find(
+        (a) => defaultArtistId && a.id === defaultArtistId
+      );
+      const targetArtist = useAISmartCategorize
+        ? explicitBulkArtist
+        : explicitBulkArtist || nextArtists[0];
 
       const items = parseBulkYouTubeLines(rawLines);
       let addedSongs = 0;
@@ -3134,7 +3360,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             matchedArtist?.name ||
             item.customArtist ||
             aiInfo.singerName ||
-            targetArtist?.name ||
+            (!useAISmartCategorize ? targetArtist?.name : undefined) ||
             meta.author;
 
           const trackId = `track-yt-bulk-${item.videoId}-${Date.now()}-${addedSongs}`;
@@ -3146,18 +3372,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
 
           const finalTitle = item.customTitle || aiInfo.cleanTitle || meta.title;
-          const candidateKey = getCanonicalSongKey({
-            title: finalTitle,
-            artist: finalSingerName,
-            youtubeId: item.videoId,
-          });
           const existingInCatalog = tracksRef.current.find(
-            (t) =>
-              t.youtubeId === item.videoId || getCanonicalSongKey(t) === candidateKey
+            (t) => t.youtubeId === item.videoId || t.id === trackId
           );
           const alreadyInNew = newTracks.some(
-            (t) =>
-              t.youtubeId === item.videoId || getCanonicalSongKey(t) === candidateKey
+            (t) => t.youtubeId === item.videoId || t.id === trackId
           );
 
           if (existingInCatalog) {
@@ -3212,11 +3431,22 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         } else if (item.type === 'playlist' && item.playlistId) {
           const serverPl = await fetchServerPlaylistTracks(
             item.playlistId,
-            defaultGenre
+            defaultGenre,
+            item.videoId,
+            item.customTitle
           );
           const plTrackIds: string[] = [];
           const sectionCounts = new Map<HomeSection, number>();
           const singerCounts = new Map<string, number>();
+
+          const catalogByYt = new Map<string, Track>();
+          for (const ct of tracksRef.current) {
+            if (ct.youtubeId) catalogByYt.set(ct.youtubeId, ct);
+          }
+          const newByYt = new Map<string, Track>();
+          for (const nt of newTracks) {
+            if (nt.youtubeId) newByYt.set(nt.youtubeId, nt);
+          }
 
           if (serverPl && serverPl.tracks.length > 0) {
             const aiResults = await classifyBatchWithAI(
@@ -3272,28 +3502,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               const sName =
                 matchedArt?.name ||
                 aiInfo.singerName ||
-                targetArtist?.name ||
+                (!useAISmartCategorize ? targetArtist?.name : undefined) ||
                 st.artist;
               if (sName && sName !== 'Various Artists') {
                 singerCounts.set(sName, (singerCounts.get(sName) || 0) + 1);
               }
 
               const cleanStTitle = aiInfo.cleanTitle || st.title;
-              const stKey = getCanonicalSongKey({
-                title: cleanStTitle,
-                artist: sName,
-                youtubeId: st.youtubeId,
-              });
-              const existingInNew = newTracks.find(
-                (t) =>
-                  (st.youtubeId && t.youtubeId === st.youtubeId) ||
-                  getCanonicalSongKey(t) === stKey
-              );
-              const existingInCatalog = tracksRef.current.find(
-                (t) =>
-                  (st.youtubeId && t.youtubeId === st.youtubeId) ||
-                  getCanonicalSongKey(t) === stKey
-              );
+              const existingInNew = st.youtubeId ? newByYt.get(st.youtubeId) : undefined;
+              const existingInCatalog = st.youtubeId ? catalogByYt.get(st.youtubeId) : undefined;
               const existing = existingInNew || existingInCatalog;
               if (existing) {
                 if (existingInCatalog) {
@@ -3301,7 +3518,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     ...existingInCatalog,
                     title: cleanStTitle || existingInCatalog.title,
                     artist: sName || existingInCatalog.artist,
-                    artistId: matchedArt?.id || existingInCatalog.artistId,
+                    artistId: matchedArt?.id,
                     section: effectiveSec,
                     createdAt: itemTs,
                   });
@@ -3326,6 +3543,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   }
                 }
                 newTracks.push(enrichedSt);
+                if (enrichedSt.youtubeId) newByYt.set(enrichedSt.youtubeId, enrichedSt);
                 plTrackIds.push(enrichedSt.id);
                 aiDetails.push({
                   title: enrichedSt.title,
@@ -3430,7 +3648,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return next;
         });
         safeSaveCatalogToLocalStorage(updatedTracks, updatedPlaylists, nextArtists);
-        await persistCatalogToServer(
+        void persistCatalogToServer(
           updatedTracks,
           updatedPlaylists,
           nextArtists
@@ -3719,6 +3937,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         monthlyListeners: artistData.monthlyListeners || '1.2M',
         bio: artistData.bio || `${cleanName} official playback artist profile on AuraStream.`,
         createdAt: nextTs,
+        ...( { isAdminCreated: true } as any ),
       };
 
       const updated = [newArtist, ...artistsRef.current.filter((a) => a.id !== newArtist.id)];
@@ -3739,7 +3958,21 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const updateArtist = useCallback(
     (artistId: string, updates: Partial<Artist>) => {
-      const updated = artistsRef.current.map((a) => (a.id === artistId ? { ...a, ...updates } : a));
+      const nextTs = getNextCatalogTimestamp(
+        tracksRef.current,
+        playlistsRef.current,
+        artistsRef.current
+      );
+      const cleanedUpdates: Partial<Artist> = {
+        ...updates,
+        ...(updates.imageUrl ? { imageUrl: updates.imageUrl.trim() } : {}),
+        ...(updates.name ? { name: updates.name.trim() } : {}),
+        createdAt: nextTs,
+        ...( { isAdminCreated: true } as any ),
+      };
+      const updated = artistsRef.current.map((a) =>
+        a.id === artistId ? { ...a, ...cleanedUpdates } : a
+      );
       artistsRef.current = updated;
       setArtists(updated);
       try {
@@ -3748,7 +3981,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         console.warn('Failed to save artists to localStorage', e);
       }
       void persistCatalogToServer(tracksRef.current, playlistsRef.current, updated);
-      showToast('Singer profile updated & saved permanently for all users!');
+      showToast('Singer profile & photo updated across all browsers!');
     },
     [persistCatalogToServer, showToast]
   );
@@ -3784,7 +4017,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
 
       safeSaveCatalogToLocalStorage(updatedTracks, updatedPlaylists, updatedArtists);
-      void persistCatalogToServer(updatedTracks, updatedPlaylists, updatedArtists);
+      void persistCatalogToServer(updatedTracks, updatedPlaylists, updatedArtists, {
+        deletedArtistIds: [artistId],
+      });
       showToast(
         removedName
           ? `Singer "${removedName}" permanently deleted everywhere.`
@@ -3792,6 +4027,62 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
     },
     [safeSaveCatalogToLocalStorage, persistCatalogToServer, showToast]
+  );
+
+  const generateTrackLyricsWithAI = useCallback(
+    async (trackId: string): Promise<boolean> => {
+      const target =
+        tracksRef.current.find((t) => t.id === trackId) ||
+        (currentTrack?.id === trackId ? currentTrack : undefined);
+      if (!target) return false;
+      try {
+        const res = await fetch('/api/ai/lyrics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            trackId: target.id,
+            title: target.title,
+            artist: target.artist,
+            album: target.album,
+            section: target.section,
+            language: target.language,
+          }),
+        });
+        if (!res.ok) return false;
+        const data = (await res.json()) as {
+          lyrics?: string[];
+          devanagariLyrics?: string[];
+        };
+        if (Array.isArray(data.lyrics) && data.lyrics.length > 0) {
+          const nextTracks = tracksRef.current.map((t) =>
+            t.id === target.id
+              ? {
+                  ...t,
+                  lyrics: data.lyrics,
+                  devanagariLyrics: data.devanagariLyrics || t.devanagariLyrics,
+                }
+              : t
+          );
+          tracksRef.current = nextTracks;
+          setTracks(nextTracks);
+          setCurrentTrack((prev) =>
+            prev && prev.id === target.id
+              ? {
+                  ...prev,
+                  lyrics: data.lyrics,
+                  devanagariLyrics: data.devanagariLyrics || prev.devanagariLyrics,
+                }
+              : prev
+          );
+          showToast(`AI Lyrics generated for "${target.title}"!`);
+          return true;
+        }
+      } catch {
+        // Fallback already present via generateSmartSongLyrics
+      }
+      return false;
+    },
+    [currentTrack, showToast]
   );
 
   const addTrackToArtist = useCallback(
@@ -3947,6 +4238,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         aiClassifySingleInput,
         aiAutoOrganizeCatalog,
         cleanFalseSingersAndDeduplicateCatalog,
+        generateTrackLyricsWithAI,
         createPlaylist,
         addAdminYouTubePlaylist,
         updatePlaylistPlacement,

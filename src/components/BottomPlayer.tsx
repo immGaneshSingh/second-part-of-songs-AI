@@ -12,7 +12,6 @@ import {
   Volume1,
   Heart,
   ListMusic,
-  FileText,
   Radio,
   ChevronDown,
 } from 'lucide-react';
@@ -48,8 +47,6 @@ export const BottomPlayer: React.FC = () => {
     toggleLike,
     isQueueOpen,
     toggleQueue,
-    isLyricsOpen,
-    toggleLyrics,
     isPlayerOpen,
     setIsPlayerOpen,
   } = useMusic();
@@ -408,19 +405,6 @@ export const BottomPlayer: React.FC = () => {
               </button>
 
               <button
-                onClick={toggleLyrics}
-                className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all cursor-pointer ${
-                  isLyricsOpen
-                    ? 'text-emerald-400 bg-emerald-500/20 border border-emerald-500/40'
-                    : 'text-slate-400 hover:text-white bg-slate-900/70 border border-slate-800/80'
-                }`}
-                title="Lyrics"
-                aria-label="Toggle lyrics"
-              >
-                <FileText className="w-4 h-4" />
-              </button>
-
-              <button
                 onClick={toggleQueue}
                 className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all cursor-pointer ${
                   isQueueOpen
@@ -435,21 +419,8 @@ export const BottomPlayer: React.FC = () => {
             </div>
           </div>
 
-          {/* Desktop Right Section: Lyrics, Queue, Volume & Hide */}
+          {/* Desktop Right Section: Queue, Volume & Hide */}
           <div className="hidden md:flex items-center justify-end gap-2 md:w-1/3">
-            <button
-              onClick={toggleLyrics}
-              className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl transition-colors cursor-pointer ${
-                isLyricsOpen
-                  ? 'text-emerald-400 bg-emerald-500/10'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-              }`}
-              title="Lyrics"
-              aria-label="Toggle lyrics"
-            >
-              <FileText className="w-4 h-4" />
-            </button>
-
             <button
               onClick={toggleQueue}
               className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl transition-colors cursor-pointer ${

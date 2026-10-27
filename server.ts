@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import * as dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
+import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI, Type } from '@google/genai';
 import { INITIAL_TRACKS, INITIAL_PLAYLISTS, INITIAL_ARTISTS } from './src/data/mockTracks.ts';
 import {
@@ -15,6 +16,7 @@ import {
   isVerifiedRealSingerName,
   deduplicateCatalogTracks,
   createSingerObjectFromAI,
+  generateSmartSongLyrics,
   type AIClassifiedTrackResult,
 } from './src/utils/audioUtils.ts';
 import type { Track, Playlist, Artist, HomeSection, Genre } from './src/types/music.ts';
@@ -74,7 +76,36 @@ function saveBase64ImageIfPresent(dataUrl?: string, prefix = 'photo'): string {
   }
 }
 
+let cachedCatalog: StoredCatalog | null = null;
+let isWritingCatalogFile = false;
+let pendingCatalogWrite: StoredCatalog | null = null;
+
+function writeCatalogToDiskAsync(catalog: StoredCatalog) {
+  pendingCatalogWrite = catalog;
+  if (isWritingCatalogFile) return;
+  isWritingCatalogFile = true;
+  setImmediate(async () => {
+    while (pendingCatalogWrite) {
+      const toWrite = pendingCatalogWrite;
+      pendingCatalogWrite = null;
+      try {
+        if (!fs.existsSync(DATA_DIR)) {
+          fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
+        await fs.promises.writeFile(CATALOG_FILE, JSON.stringify(toWrite), 'utf-8');
+      } catch (err) {
+        console.error('Error saving catalog to disk:', err);
+      }
+    }
+    isWritingCatalogFile = false;
+  });
+}
+
 function ensureCatalogFile(): StoredCatalog {
+  if (cachedCatalog) {
+    return cachedCatalog;
+  }
+
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -101,8 +132,8 @@ function ensureCatalogFile(): StoredCatalog {
         Array.isArray(parsed.artists) && parsed.artists.length > 0
           ? parsed.artists
           : INITIAL_ARTISTS;
-      const rawCatalog: StoredCatalog = {
-        tracks: parsed.tracks,
+      cachedCatalog = {
+        tracks: parsed.tracks.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => t),
         playlists: parsed.playlists,
         artists: storedArtists,
         deletedTrackIds: Array.isArray(parsed.deletedTrackIds) ? parsed.deletedTrackIds : [],
@@ -110,25 +141,14 @@ function ensureCatalogFile(): StoredCatalog {
         deletedArtistIds: Array.isArray(parsed.deletedArtistIds) ? parsed.deletedArtistIds : [],
         updatedAt: parsed.updatedAt || new Date().toISOString(),
       };
-      try {
-        const synced = healCatalogStructureSync(rawCatalog);
-        if (synced.changed) {
-          try {
-            fs.writeFileSync(CATALOG_FILE, JSON.stringify(synced.catalog, null, 2), 'utf-8');
-          } catch {}
-        }
-        return synced.catalog;
-      } catch (healErr) {
-        console.warn('Non-fatal warning during healCatalogStructureSync:', healErr);
-        return rawCatalog;
-      }
+      return cachedCatalog;
     }
   } catch (err) {
     console.warn('Could not read catalog file:', err);
   }
 
   const initial: StoredCatalog = {
-    tracks: INITIAL_TRACKS,
+    tracks: INITIAL_TRACKS.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => t),
     playlists: INITIAL_PLAYLISTS,
     artists: INITIAL_ARTISTS,
     deletedTrackIds: [],
@@ -137,13 +157,8 @@ function ensureCatalogFile(): StoredCatalog {
     updatedAt: new Date().toISOString(),
   };
 
-  if (!fs.existsSync(CATALOG_FILE)) {
-    try {
-      fs.writeFileSync(CATALOG_FILE, JSON.stringify(initial, null, 2), 'utf-8');
-    } catch (err) {
-      console.warn('Could not write initial catalog file:', err);
-    }
-  }
+  cachedCatalog = initial;
+  writeCatalogToDiskAsync(initial);
   return initial;
 }
 
@@ -157,14 +172,7 @@ function saveCatalogFile(
     deletedArtistIds?: string[];
   }
 ): StoredCatalog {
-  const current = (() => {
-    try {
-      if (fs.existsSync(CATALOG_FILE)) {
-        return JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8')) as Partial<StoredCatalog>;
-      }
-    } catch {}
-    return null;
-  })();
+  const current = cachedCatalog || ensureCatalogFile();
 
   const rawArtists =
     Array.isArray(artists) && artists.length > 0
@@ -173,17 +181,16 @@ function saveCatalogFile(
       ? current!.artists
       : INITIAL_ARTISTS;
 
-  // Clean any base64 images in artists and tracks by saving them permanently to disk as /uploads/...
   const resolvedArtists = rawArtists.map((a) => {
-    if (a.imageUrl && a.imageUrl.startsWith('data:')) {
+    if (a.imageUrl && a.imageUrl.startsWith('data:') && a.imageUrl.length > 250000) {
       const safePrefix = `singer-${a.name.slice(0, 12).replace(/[^a-zA-Z0-9]/g, '_')}`;
       return { ...a, imageUrl: saveBase64ImageIfPresent(a.imageUrl, safePrefix) };
     }
     return a;
   });
 
-  const resolvedTracks = tracks.map((t) => {
-    if (t.coverUrl && t.coverUrl.startsWith('data:')) {
+  const resolvedTracks = tracks.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => {
+    if (t.coverUrl && t.coverUrl.startsWith('data:') && t.coverUrl.length > 250000) {
       const safePrefix = `cover-${t.title.slice(0, 12).replace(/[^a-zA-Z0-9]/g, '_')}`;
       return { ...t, coverUrl: saveBase64ImageIfPresent(t.coverUrl, safePrefix) };
     }
@@ -199,77 +206,70 @@ function saveCatalogFile(
     deletedArtistIds: deletions?.deletedArtistIds ?? current?.deletedArtistIds ?? [],
     updatedAt: new Date().toISOString(),
   };
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(UPLOADS_DIR)) {
-      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-    }
-    fs.writeFileSync(CATALOG_FILE, JSON.stringify(updated, null, 2), 'utf-8');
-    if (fs.existsSync(CATALOG_BACKUP_FILE)) {
-      try {
-        fs.unlinkSync(CATALOG_BACKUP_FILE);
-      } catch {}
-    }
-  } catch (err) {
-    console.error('Error saving catalog to disk:', err);
-  }
+
+  cachedCatalog = updated;
+  writeCatalogToDiskAsync(updated);
   return updated;
 }
 
-function getSupabaseCredentials(): { url: string; key: string } | null {
-  const url = process.env.SUPABASE_URL?.trim();
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-    process.env.SUPABASE_ANON_KEY?.trim();
+function normalizeSupabaseUrl(rawUrl?: string): string {
+  if (!rawUrl) return '';
+  return rawUrl
+    .trim()
+    .replace(/\/rest\/v1\/?$/i, '')
+    .replace(/\/+$/, '');
+}
+
+function getSupabaseCredentials(): { url: string; key: string; anonKey: string } | null {
+  const rawUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.trim();
+  const rawAnon = (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY)?.trim();
+  const rawService = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+
+  const isPlaceholder = (val?: string) =>
+    !val ||
+    val.includes('your-project.supabase.co') ||
+    val.includes('your_project') ||
+    val.includes('example.com') ||
+    val.includes('your-anon-key') ||
+    val.includes('your-service-role-key') ||
+    val === 'placeholder';
+
+  const url = normalizeSupabaseUrl(!isPlaceholder(rawUrl) ? rawUrl : '');
+  const anonKey = !isPlaceholder(rawAnon) ? rawAnon! : '';
+  const serviceKey = !isPlaceholder(rawService) ? rawService! : '';
+  const key = serviceKey || anonKey;
+
   if (!url || !key) return null;
-  return { url: url.replace(/\/$/, ''), key };
+  return { url, key, anonKey: anonKey || key };
 }
 
 async function fetchFromSupabaseIfConfigured(): Promise<StoredCatalog | null> {
   const creds = getSupabaseCredentials();
   if (!creds) return null;
 
-  const endpoints = [
-    `${creds.url}/rest/v1/site_catalog?id=eq.global_catalog&select=tracks,playlists,artists,updated_at`,
-    `${creds.url}/rest/v1/site_catalog?id=eq.global_catalog&select=tracks,playlists,updated_at`,
-  ];
+  try {
+    const supabase = createClient(creds.url, creds.key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data, error } = await supabase
+      .from('site_catalog')
+      .select('tracks,playlists,artists,updated_at')
+      .eq('id', 'global_catalog')
+      .maybeSingle();
 
-  for (const endpoint of endpoints) {
-    try {
-      const res = await fetch(endpoint, {
-        method: 'GET',
-        headers: {
-          apikey: creds.key,
-          Authorization: `Bearer ${creds.key}`,
-          Accept: 'application/json',
-        },
-      });
-      if (!res.ok) continue;
-      const rows = (await res.json()) as Array<{
-        tracks?: Track[];
-        playlists?: Playlist[];
-        artists?: Artist[];
-        updated_at?: string;
-      }>;
-      if (Array.isArray(rows) && rows.length > 0) {
-        const row = rows[0];
-        if (Array.isArray(row.tracks) && row.tracks.length > 0 && Array.isArray(row.playlists)) {
-          return {
-            tracks: row.tracks,
-            playlists: row.playlists,
-            artists:
-              Array.isArray(row.artists) && row.artists.length > 0
-                ? row.artists
-                : INITIAL_ARTISTS,
-            updatedAt: row.updated_at || new Date().toISOString(),
-          };
-        }
-      }
-    } catch {
-      // try fallback select without artists column
+    if (!error && data && Array.isArray(data.tracks) && data.tracks.length > 0 && Array.isArray(data.playlists)) {
+      return {
+        tracks: data.tracks as Track[],
+        playlists: data.playlists as Playlist[],
+        artists:
+          Array.isArray(data.artists) && data.artists.length > 0
+            ? (data.artists as Artist[])
+            : INITIAL_ARTISTS,
+        updatedAt: data.updated_at || new Date().toISOString(),
+      };
     }
+  } catch (err) {
+    console.warn('Supabase fetch warning:', err);
   }
   return null;
 }
@@ -278,43 +278,75 @@ async function syncToSupabaseIfConfigured(catalog: StoredCatalog): Promise<boole
   const creds = getSupabaseCredentials();
   if (!creds) return false;
 
-  const endpoint = `${creds.url}/rest/v1/site_catalog`;
-  const headers = {
-    apikey: creds.key,
-    Authorization: `Bearer ${creds.key}`,
-    'Content-Type': 'application/json',
-    Prefer: 'resolution=merge-duplicates',
-  };
+  const supabase = createClient(creds.url, creds.key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 
+  let syncedMain = false;
   try {
-    // First attempt with artists column; if the user's Supabase table only has (id, tracks, playlists, updated_at), fallback without artists
-    const resWithArtists = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
+    const cleanTracks = catalog.tracks.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => t);
+    const { error } = await supabase.from('site_catalog').upsert(
+      {
         id: 'global_catalog',
-        tracks: catalog.tracks,
+        tracks: cleanTracks,
         playlists: catalog.playlists,
         artists: catalog.artists || INITIAL_ARTISTS,
         updated_at: catalog.updatedAt,
-      }),
-    });
-    if (resWithArtists.ok) return true;
-
-    const resBase = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        id: 'global_catalog',
-        tracks: catalog.tracks,
-        playlists: catalog.playlists,
-        updated_at: catalog.updatedAt,
-      }),
-    });
-    return resBase.ok;
+      },
+      { onConflict: 'id' }
+    );
+    syncedMain = !error;
   } catch {
-    return false;
+    syncedMain = false;
   }
+
+  // Also sync individual relational tables (artists, playlists, and recent songs) in background so Supabase Table Editor & Realtime .on() listeners fire immediately
+  void (async () => {
+    try {
+      const artistRows = (catalog.artists || INITIAL_ARTISTS).map((a) => ({
+        id: a.id,
+        name: a.name,
+        language: a.language || 'Hindi',
+        role: a.role || null,
+        data: a,
+        updated_at: catalog.updatedAt,
+      }));
+      if (artistRows.length > 0) {
+        await supabase.from('artists').upsert(artistRows, { onConflict: 'id' });
+      }
+
+      const playlistRows = catalog.playlists.map((p) => ({
+        id: p.id,
+        name: p.name,
+        section: p.section || 'hindi',
+        artist_name: p.artistName || null,
+        data: p,
+        updated_at: catalog.updatedAt,
+      }));
+      if (playlistRows.length > 0) {
+        await supabase.from('playlists').upsert(playlistRows, { onConflict: 'id' });
+      }
+
+      // Upsert the latest 120 songs (newly uploaded/modified tracks are sorted first) for ultra-fast real-time sync without lyrics
+      const recentTracks = catalog.tracks.slice(0, 120);
+      const songRows = recentTracks.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        section: t.section || 'hindi',
+        youtube_id: t.youtubeId || null,
+        data: t,
+        updated_at: catalog.updatedAt,
+      }));
+      if (songRows.length > 0) {
+        await supabase.from('songs').upsert(songRows, { onConflict: 'id' });
+      }
+    } catch (err) {
+      console.warn('Relational Supabase sync warning:', err);
+    }
+  })();
+
+  return syncedMain;
 }
 
 function isLegacyPlaceholderAudio(url?: string): boolean {
@@ -608,10 +640,10 @@ async function fetchServerYouTubePlaylist(
           extractPlaylistItemsFromYtData(parsedData, seenIds, videos, continuations, maxItems);
         }
 
-        // Follow continuation tokens to load remaining songs (100 -> 500 songs)
+        // Only follow 1 fast continuation if initial page returned fewer than 40 songs
         const processedTokens = new Set<string>();
         let pageCount = 0;
-        while (continuations.length > 0 && videos.length < maxItems && pageCount < 4) {
+        while (continuations.length > 0 && videos.length < Math.min(maxItems, 40) && pageCount < 1) {
           const token = continuations.shift()!;
           if (!token || processedTokens.has(token)) continue;
           processedTokens.add(token);
@@ -625,7 +657,7 @@ async function fetchServerYouTubePlaylist(
                   ...YT_HEADERS,
                   'Content-Type': 'application/json',
                 },
-                signal: AbortSignal.timeout(3500),
+                signal: AbortSignal.timeout(1200),
                 body: JSON.stringify({
                   context: {
                     client: {
@@ -841,7 +873,7 @@ function healCatalogStructureSync(catalog: StoredCatalog): {
   const channelNoiseRegex =
     /\b(music|vibes|lofi|records|studio|studios|official|channel|edits|mix|jukebox|production|productions|junction|creation|creations|world|entertainment|media|films|beats|series|audio|video|tv|network|club|hub|zone|waves|sounds|tunes|melody|hit|hits|songs|song|playlist|bollywood|bhojpuri|bhakti|indie|pop|chill|relax|peaceful|acoustic|viral|trending|mashup|reverb|slowed)\b/i;
 
-  // Filter out noisy auto-generated channel/movie/actor artists from healedArtists while preserving INITIAL_ARTISTS and verified singers
+  // Strictly filter out noisy auto-generated channel/movie/actor/song-title artists from healedArtists while preserving INITIAL_ARTISTS, verified real singers, and Admin-created singers
   const beforeArtistCount = healedArtists.length;
   const seenSingerLower = new Set<string>();
   healedArtists = healedArtists.filter((a) => {
@@ -850,17 +882,12 @@ function healCatalogStructureSync(catalog: StoredCatalog): {
       changed = true;
       return false;
     }
-    if (
+    const isVerifiedOrDefault =
       defaultArtistIds.has(a.id) ||
-      a.id.startsWith('artist-') ||
-      Boolean(a.createdAt)
-    ) {
-      seenSingerLower.add(lower);
-      return true;
-    }
-    if (channelNoiseRegex.test(a.name) || isGenericChannelOrLabel(a.name) || !isVerifiedRealSingerName(a.name)) {
+      isVerifiedRealSingerName(a.name) ||
+      Boolean((a as any).isAdminCreated);
+    if (!isVerifiedOrDefault || channelNoiseRegex.test(a.name) || isGenericChannelOrLabel(a.name)) {
       changed = true;
-      deletedArtistIds.add(a.id);
       return false;
     }
     seenSingerLower.add(lower);
@@ -868,6 +895,20 @@ function healCatalogStructureSync(catalog: StoredCatalog): {
   });
   if (healedArtists.length !== beforeArtistCount) {
     changed = true;
+  }
+
+  // Map track IDs to their parent playlist names for rich context during classification
+  const trackToPlaylistTitle = new Map<string, string>();
+  if (Array.isArray(catalog.playlists)) {
+    for (const pl of catalog.playlists) {
+      if (pl.name && Array.isArray(pl.trackIds)) {
+        for (const tid of pl.trackIds) {
+          if (!trackToPlaylistTitle.has(tid)) {
+            trackToPlaylistTitle.set(tid, pl.name);
+          }
+        }
+      }
+    }
   }
 
   const healedTracks: Track[] = [];
@@ -908,25 +949,37 @@ function healCatalogStructureSync(catalog: StoredCatalog): {
         changed = true;
       }
     } else {
+      const parentPlaylistTitle = trackToPlaylistTitle.get(nextTrack.id) || '';
       const classified = smartClassifyTrackMetadata(
         {
           title: nextTrack.title,
           artist: nextTrack.artist,
           album: nextTrack.album,
+          playlistTitle: parentPlaylistTitle,
         },
         healedArtists
       );
 
       const isPoisonedArijit =
         nextTrack.artist.trim().toLowerCase() === 'arijit singh' &&
+        classified.singerName.toLowerCase() !== 'arijit singh' &&
         !/\b(arijit|kesariya|tum hi ho|channa mereya|apna bana le|agar tum saath ho|gerua)\b/i.test(
           `${nextTrack.title} ${nextTrack.album || ''}`
+        );
+
+      const artistIsNotVerifiedSinger =
+        !isVerifiedRealSingerName(nextTrack.artist) &&
+        !healedArtists.some(
+          (a) =>
+            Boolean((a as any).isAdminCreated) &&
+            a.name.trim().toLowerCase() === nextTrack.artist.trim().toLowerCase()
         );
 
       if (
         classified.singerName &&
         classified.singerName !== 'Various Artists' &&
-        (isGenericChannelOrLabel(nextTrack.artist) ||
+        (artistIsNotVerifiedSinger ||
+          isGenericChannelOrLabel(nextTrack.artist) ||
           isPoisonedArijit ||
           nextTrack.artist === 'YouTube Artist' ||
           nextTrack.artist === 'Indian Artist')
@@ -940,9 +993,11 @@ function healCatalogStructureSync(catalog: StoredCatalog): {
       if (
         classified.cleanTitle &&
         classified.cleanTitle !== nextTrack.title &&
-        (nextTrack.title.includes('|') ||
+        (artistIsNotVerifiedSinger ||
+          nextTrack.title.includes('|') ||
           nextTrack.title.includes('(with ') ||
-          nextTrack.title.includes(' - '))
+          nextTrack.title.includes(' - ') ||
+          /^(full\s*video|reprise|masti|dabanng|dabangg|m\.s\.\s*dhoni)/i.test(nextTrack.title))
       ) {
         nextTrack.title = classified.cleanTitle;
         changed = true;
@@ -1060,6 +1115,13 @@ function healCatalogStructureSync(catalog: StoredCatalog): {
           changed = true;
         }
       }
+    }
+
+    // Strip any stored lyrics so lyrics are never stored in catalog.json or Supabase
+    if (nextTrack.lyrics !== undefined || nextTrack.devanagariLyrics !== undefined) {
+      delete nextTrack.lyrics;
+      delete nextTrack.devanagariLyrics;
+      changed = true;
     }
 
     healedTracks.push(nextTrack);
@@ -1311,8 +1373,9 @@ async function startServer() {
   }
   app.use('/uploads', express.static(UPLOADS_DIR));
 
-  // Initialize permanent catalog on server startup
-  ensureCatalogFile();
+  // Initialize permanent catalog on server startup and ensure Supabase is seeded
+  const startupCatalog = ensureCatalogFile();
+  void syncToSupabaseIfConfigured(startupCatalog);
 
   // POST /api/upload-photo — Saves uploaded singer photos & cover art permanently on the server
   app.post('/api/upload-photo', async (req, res) => {
@@ -1403,8 +1466,8 @@ async function startServer() {
               systemInstruction:
                 'You are an expert Music Catalog AI Manager for AuraStream Music. For each song, identify: ' +
                 '1) cleanTitle: the clean song title without YouTube clutter like (Official Video) or [Full Audio]. ' +
-                '2) singerName: the true primary singer or band name (e.g. "The Weeknd", "Arijit Singh", "Pawan Singh", "Ed Sheeran", "Shreya Ghoshal", "Yo Yo Honey Singh", "Khesari Lal Yadav", "Hariharan", "Dua Lipa", "Taylor Swift"). NEVER return a record label like T-Series, Zee Music, VEVO, or YouTube Music as singerName if the real singer can be identified. Canonicalize "weeknd" to "The Weeknd". ' +
-                '3) section: must be one of "hindi" (Bollywood/Hindi/Punjabi secular songs), "bhojpuri" (Bhojpuri folk/pop songs), "bhakti" (Hindu devotional/religious/God bhajans, aartis, chalisas, stotrams), or "english" (English/International pop, rock, R&B, synthwave, global songs like The Weeknd, Ed Sheeran, etc.). ' +
+                '2) singerName: the true primary singer or band name (e.g. "The Weeknd", "Arijit Singh", "Pawan Singh", "Ed Sheeran", "Shreya Ghoshal", "Yo Yo Honey Singh", "Khesari Lal Yadav", "Hariharan", "Lakhbir Singh Lakkha", "Jaya Kishori", "Dua Lipa", "Taylor Swift"). NEVER return a record label like T-Series, Zee Music, VEVO, or YouTube Music as singerName if the real singer can be identified. CRITICAL: NEVER guess or default to "Arijit Singh" unless Arijit Singh actually sang the song! Canonicalize "weeknd" to "The Weeknd". ' +
+                '3) section: must be one of "bhakti" (ALL Hindu devotional/religious/God songs, bhajans, aartis, chalisas, stotrams, mantras, kirtans, Radhe Krishna, Ram, Shiv/Mahadev/Bholenath, Hanuman, Mata Rani/Devi Geet/Navratri/Durga/Kali, Chhath Puja, Bolbam/Kanwar, Khatu Shyam — even if sung in Bhojpuri or Hindi or titled with Lofi/English Lyrics, ALWAYS classify devotional songs as "bhakti"!), "bhojpuri" (secular Bhojpuri folk/pop/film songs), "english" (English/International pop, rock, R&B, global songs), or "hindi" (Bollywood/Hindi/Punjabi secular romantic/pop songs). ' +
                 '4) singerLanguage: must be one of "Hindi", "Bhojpuri", "Pan-Indian", "Punjabi", or "Other Country" (use "Other Country" for English/international artists like The Weeknd). ' +
                 '5) singerRole: short 3-6 word description of the singer (e.g. "Global Pop & R&B Superstar").',
               responseMimeType: 'application/json',
@@ -1568,7 +1631,7 @@ async function startServer() {
         playlistSection = plClassified.section;
       }
 
-      let primarySingerName = finalTrackResults[0]?.singerName || 'Arijit Singh';
+      let primarySingerName = finalTrackResults[0]?.singerName || 'Bollywood Playback';
       let maxSingerCount = 0;
       for (const [sName, count] of singerCounts.entries()) {
         if (count > maxSingerCount) {
@@ -1695,49 +1758,178 @@ async function startServer() {
     }
   });
 
-  // GET /api/catalog — Returns permanent songs, playlists, & singers for every user visiting the website & APK
-  app.get('/api/catalog', async (_req, res) => {
+  // Real-time Server-Sent Events (SSE) clients for instant multi-device cross-browser sync
+  const sseClients = new Set<express.Response>();
+  function broadcastCatalogUpdate(updatedAt: string) {
+    const payload = `data: ${JSON.stringify({ type: 'catalog_updated', updatedAt })}\n\n`;
+    for (const client of sseClients) {
+      try {
+        client.write(payload);
+      } catch {
+        sseClients.delete(client);
+      }
+    }
+  }
+
+  // GET /api/catalog/stream — Real-time Server-Sent Events stream so any phone/laptop browser auto-updates within <1s when Admin edits catalog
+  app.get('/api/catalog/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const initialCatalog = ensureCatalogFile();
+    res.write(
+      `data: ${JSON.stringify({ type: 'connected', updatedAt: initialCatalog.updatedAt })}\n\n`
+    );
+
+    sseClients.add(res);
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      } catch {
+        clearInterval(heartbeat);
+        sseClients.delete(res);
+      }
+    }, 20000);
+
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    });
+  });
+
+  // POST /api/ai/lyrics — Generates AI-written lyrics (Roman + Devanagari) for any song and saves them permanently
+  app.post('/api/ai/lyrics', async (req, res) => {
     try {
-      const hasSupabase = Boolean(getSupabaseCredentials());
-      let catalog = ensureCatalogFile();
+      const { trackId, title, artist, album, section, language } = req.body as {
+        trackId?: string;
+        title?: string;
+        artist?: string;
+        album?: string;
+        section?: HomeSection;
+        language?: string;
+      };
 
-      // Only hydrate from Supabase if local catalog is empty/uninitialized; never resurrect deleted items from remote
-      if (
-        hasSupabase &&
-        catalog.tracks.length <= INITIAL_TRACKS.length &&
-        (catalog.deletedTrackIds || []).length === 0 &&
-        (catalog.deletedPlaylistIds || []).length === 0
-      ) {
-        const remoteCatalog = await fetchFromSupabaseIfConfigured();
-        if (remoteCatalog && remoteCatalog.tracks.length > catalog.tracks.length) {
-          const deletedTracksSet = new Set(catalog.deletedTrackIds || []);
-          const deletedPlaylistsSet = new Set(catalog.deletedPlaylistIds || []);
-          const deletedArtistsSet = new Set(catalog.deletedArtistIds || []);
+      const catalog = ensureCatalogFile();
+      const targetTrack = trackId ? catalog.tracks.find((t) => t.id === trackId) : undefined;
+      const songTitle = (title || targetTrack?.title || 'Untitled Song').trim();
+      const songArtist = (artist || targetTrack?.artist || 'Indian Artist').trim();
+      const songAlbum = (album || targetTrack?.album || 'Official Release').trim();
+      const songSection = section || targetTrack?.section || 'hindi';
 
-          const mergedRaw: StoredCatalog = {
-            tracks: remoteCatalog.tracks.filter((t) => !deletedTracksSet.has(t.id)),
-            playlists: remoteCatalog.playlists.filter((p) => !deletedPlaylistsSet.has(p.id)),
-            artists: (remoteCatalog.artists || INITIAL_ARTISTS).filter(
-              (a) => !deletedArtistsSet.has(a.id)
-            ),
-            deletedTrackIds: catalog.deletedTrackIds || [],
-            deletedPlaylistIds: catalog.deletedPlaylistIds || [],
-            deletedArtistIds: catalog.deletedArtistIds || [],
-            updatedAt: new Date().toISOString(),
-          };
-          const healedSync = healCatalogStructureSync(mergedRaw);
-          catalog = saveCatalogFile(
-            healedSync.catalog.tracks,
-            healedSync.catalog.playlists,
-            healedSync.catalog.artists,
-            {
-              deletedTrackIds: healedSync.catalog.deletedTrackIds,
-              deletedPlaylistIds: healedSync.catalog.deletedPlaylistIds,
-              deletedArtistIds: healedSync.catalog.deletedArtistIds,
+      const fallback = generateSmartSongLyrics({
+        title: songTitle,
+        hindiTitle: targetTrack?.hindiTitle,
+        artist: songArtist,
+        album: songAlbum,
+        section: songSection,
+        genre: targetTrack?.genre || 'Hindi',
+        language: (language as any) || targetTrack?.language || 'Hindi',
+      });
+
+      let lyrics = fallback.lyrics;
+      let devanagariLyrics = fallback.devanagariLyrics;
+      let aiGenerated = false;
+
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
+      if (apiKey) {
+        try {
+          const ai = new GoogleGenAI({
+            apiKey,
+            httpOptions: {
+              headers: {
+                'User-Agent': 'aistudio-build',
+              },
+            },
+          });
+
+          const response = await ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: `Write 10 lines of pure, expressive song lyrics (ONLY the actual singing verses, NO song title header, NO singer name mention, NO album name mention, NO musical note symbols ♪) for the song "${songTitle}" by "${songArtist}" (Category: "${songSection}"). Provide both Romanized (Hinglish/English) lines and Hindi Devanagari script lines.`,
+            config: {
+              systemInstruction:
+                'You are an expert Indian & Global Lyricist. Output ONLY pure singing verses/lines of the song. NEVER include headers, footers, ♪ symbols, singer names, album names, or descriptions about the singer. Return both "lyrics" (Roman script / Hinglish or English) and "devanagariLyrics" (Hindi Devanagari script).',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  lyrics: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  devanagariLyrics: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: ['lyrics', 'devanagariLyrics'],
+              },
+            },
+          });
+
+          const rawText = response.text?.trim();
+          if (rawText) {
+            const parsed = JSON.parse(rawText) as {
+              lyrics?: string[];
+              devanagariLyrics?: string[];
+            };
+            if (
+              Array.isArray(parsed.lyrics) &&
+              parsed.lyrics.length >= 4 &&
+              Array.isArray(parsed.devanagariLyrics) &&
+              parsed.devanagariLyrics.length >= 4
+            ) {
+              lyrics = parsed.lyrics;
+              devanagariLyrics = parsed.devanagariLyrics;
+              aiGenerated = true;
             }
-          );
-          void syncToSupabaseIfConfigured(catalog);
+          }
+        } catch (aiErr) {
+          console.warn('Gemini lyrics generation fallback to smart lyrics:', aiErr);
         }
+      }
+
+      if (targetTrack) {
+        const updatedTracks = catalog.tracks.map((t) =>
+          t.id === targetTrack.id ? { ...t, lyrics, devanagariLyrics } : t
+        );
+        const saved = saveCatalogFile(updatedTracks, catalog.playlists, catalog.artists, {
+          deletedTrackIds: catalog.deletedTrackIds,
+          deletedPlaylistIds: catalog.deletedPlaylistIds,
+          deletedArtistIds: catalog.deletedArtistIds,
+        });
+        void syncToSupabaseIfConfigured(saved);
+        broadcastCatalogUpdate(saved.updatedAt);
+      }
+
+      res.json({
+        success: true,
+        aiGenerated,
+        lyrics,
+        devanagariLyrics,
+      });
+    } catch (err) {
+      console.error('Error in /api/ai/lyrics:', err);
+      res.status(500).json({ error: 'Failed to generate AI lyrics' });
+    }
+  });
+
+  // GET /api/catalog — Returns permanent songs, playlists, & singers for every user visiting the website & APK
+  app.get('/api/catalog', async (req, res) => {
+    try {
+      const supaCreds = getSupabaseCredentials();
+      const hasSupabase = Boolean(supaCreds);
+      const catalog = ensureCatalogFile();
+
+      const since = String(req.query.since || '').trim();
+      if (since && since === catalog.updatedAt) {
+        res.json({
+          unchanged: true,
+          updatedAt: catalog.updatedAt,
+          storageMode: hasSupabase ? 'supabase+server' : 'server-permanent',
+        });
+        return;
       }
 
       res.json({
@@ -1749,6 +1941,9 @@ async function startServer() {
         deletedArtistIds: catalog.deletedArtistIds || [],
         updatedAt: catalog.updatedAt,
         storageMode: hasSupabase ? 'supabase+server' : 'server-permanent',
+        supabaseConfig: supaCreds
+          ? { url: supaCreds.url, anonKey: supaCreds.anonKey }
+          : null,
       });
     } catch (err) {
       console.error('Error serving /api/catalog:', err);
@@ -1758,18 +1953,31 @@ async function startServer() {
         artists: INITIAL_ARTISTS,
         updatedAt: new Date().toISOString(),
         storageMode: 'server-permanent',
+        supabaseConfig: null,
       });
     }
   });
 
-  // POST /api/catalog — Saves songs, playlists, & singers permanently on the server for all users & APK
+  // POST /api/catalog — Saves songs, playlists, & singers permanently on the server & broadcasts to all connected devices
   app.post('/api/catalog', async (req, res) => {
     try {
-      const { tracks, playlists, artists, authoritative } = req.body as {
+      const {
+        tracks,
+        playlists,
+        artists,
+        deletedTrackIds: reqDeletedTrackIds,
+        deletedPlaylistIds: reqDeletedPlaylistIds,
+        deletedArtistIds: reqDeletedArtistIds,
+        replaceAll,
+      } = req.body as {
         tracks?: Track[];
         playlists?: Playlist[];
         artists?: Artist[];
         authoritative?: boolean;
+        replaceAll?: boolean;
+        deletedTrackIds?: string[];
+        deletedPlaylistIds?: string[];
+        deletedArtistIds?: string[];
       };
       const current = ensureCatalogFile();
 
@@ -1777,115 +1985,116 @@ async function startServer() {
       const nextDeletedPlaylists = new Set(current.deletedPlaylistIds || []);
       const nextDeletedArtists = new Set(current.deletedArtistIds || []);
 
-      // Only treat as accidental unhydrated partial sync if authoritative is NOT set and client sends tiny default payload
-      const isAccidentalPartialTrackSync =
-        !authoritative &&
-        Array.isArray(tracks) &&
-        current.tracks.length > 200 &&
-        tracks.length <= INITIAL_TRACKS.length + 5;
+      if (Array.isArray(reqDeletedTrackIds)) {
+        for (const id of reqDeletedTrackIds) nextDeletedTracks.add(id);
+      }
+      if (Array.isArray(reqDeletedPlaylistIds)) {
+        for (const id of reqDeletedPlaylistIds) nextDeletedPlaylists.add(id);
+      }
+      if (Array.isArray(reqDeletedArtistIds)) {
+        for (const id of reqDeletedArtistIds) nextDeletedArtists.add(id);
+      }
 
-      const isAccidentalPartialPlaylistSync =
-        !authoritative &&
-        Array.isArray(playlists) &&
-        current.playlists.length > 15 &&
-        playlists.length <= INITIAL_PLAYLISTS.length + 2;
+      const isReplaceAll = Boolean(replaceAll || (req.body as any).authoritative);
 
-      let nextTracks = current.tracks;
-      if (Array.isArray(tracks)) {
-        if (isAccidentalPartialTrackSync) {
+      let nextTracks = current.tracks.filter((t) => !nextDeletedTracks.has(t.id));
+      if (Array.isArray(tracks) && tracks.length > 0) {
+        if (isReplaceAll) {
+          const incomingIds = new Set(tracks.map((t) => t.id));
+          for (const t of current.tracks) {
+            if (!incomingIds.has(t.id)) nextDeletedTracks.add(t.id);
+          }
+          for (const id of incomingIds) nextDeletedTracks.delete(id);
+          nextTracks = tracks;
+        } else {
           const mergedMap = new Map<string, Track>();
-          for (const t of tracks) mergedMap.set(t.id, t);
+          for (const t of tracks) {
+            if (!t || !t.id) continue;
+            nextDeletedTracks.delete(t.id);
+            mergedMap.set(t.id, t);
+          }
           for (const t of current.tracks) {
             if (!mergedMap.has(t.id) && !nextDeletedTracks.has(t.id)) {
               mergedMap.set(t.id, t);
             }
           }
-          nextTracks = Array.from(mergedMap.values());
-        } else {
-          const incomingIds = new Set(tracks.map((t) => t.id));
-          for (const t of current.tracks) {
-            if (!incomingIds.has(t.id)) {
-              nextDeletedTracks.add(t.id);
-            }
-          }
-          for (const id of incomingIds) {
-            nextDeletedTracks.delete(id);
-          }
-          nextTracks = tracks;
+          nextTracks = Array.from(mergedMap.values()).sort(
+            (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+          );
         }
       }
 
-      let nextPlaylists = current.playlists;
-      if (Array.isArray(playlists)) {
-        if (isAccidentalPartialPlaylistSync) {
+      let nextPlaylists = current.playlists.filter((p) => !nextDeletedPlaylists.has(p.id));
+      if (Array.isArray(playlists) && playlists.length > 0) {
+        if (isReplaceAll) {
+          const incomingIds = new Set(playlists.map((p) => p.id));
+          for (const p of current.playlists) {
+            if (!incomingIds.has(p.id)) nextDeletedPlaylists.add(p.id);
+          }
+          for (const id of incomingIds) nextDeletedPlaylists.delete(id);
+          nextPlaylists = playlists;
+        } else {
           const mergedPlMap = new Map<string, Playlist>();
-          for (const p of playlists) mergedPlMap.set(p.id, p);
+          for (const p of playlists) {
+            if (!p || !p.id) continue;
+            nextDeletedPlaylists.delete(p.id);
+            mergedPlMap.set(p.id, p);
+          }
           for (const p of current.playlists) {
             if (!mergedPlMap.has(p.id) && !nextDeletedPlaylists.has(p.id)) {
               mergedPlMap.set(p.id, p);
             }
           }
-          nextPlaylists = Array.from(mergedPlMap.values());
+          nextPlaylists = Array.from(mergedPlMap.values()).sort(
+            (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+          );
+        }
+      }
+
+      let nextArtists = (
+        current.artists && current.artists.length > 0 ? current.artists : INITIAL_ARTISTS
+      ).filter((a) => !nextDeletedArtists.has(a.id));
+      if (Array.isArray(artists) && artists.length > 0) {
+        if (isReplaceAll) {
+          const incomingIds = new Set(artists.map((a) => a.id));
+          for (const a of current.artists) {
+            if (!incomingIds.has(a.id)) nextDeletedArtists.add(a.id);
+          }
+          for (const id of incomingIds) nextDeletedArtists.delete(id);
+          nextArtists = artists;
         } else {
-          const incomingIds = new Set(playlists.map((p) => p.id));
-          for (const p of current.playlists) {
-            if (!incomingIds.has(p.id)) {
-              nextDeletedPlaylists.add(p.id);
+          const mergedArtMap = new Map<string, Artist>();
+          for (const a of artists) {
+            if (!a || !a.id) continue;
+            nextDeletedArtists.delete(a.id);
+            mergedArtMap.set(a.id, a);
+          }
+          for (const a of current.artists) {
+            if (!mergedArtMap.has(a.id) && !nextDeletedArtists.has(a.id)) {
+              mergedArtMap.set(a.id, a);
             }
           }
-          for (const id of incomingIds) {
-            nextDeletedPlaylists.delete(id);
-          }
-          nextPlaylists = playlists;
+          nextArtists = Array.from(mergedArtMap.values());
         }
       }
-
-      let nextArtists =
-        current.artists && current.artists.length > 0
-          ? current.artists
-          : INITIAL_ARTISTS;
-      if (Array.isArray(artists) && artists.length > 0) {
-        const incomingIds = new Set(artists.map((a) => a.id));
-        for (const a of current.artists) {
-          if (!incomingIds.has(a.id)) {
-            nextDeletedArtists.add(a.id);
-          }
-        }
-        for (const id of incomingIds) {
-          nextDeletedArtists.delete(id);
-        }
-        nextArtists = artists;
-      }
-
-      const healed = healCatalogStructureSync({
-        tracks: nextTracks,
-        playlists: nextPlaylists,
-        artists: nextArtists,
-        deletedTrackIds: Array.from(nextDeletedTracks),
-        deletedPlaylistIds: Array.from(nextDeletedPlaylists),
-        deletedArtistIds: Array.from(nextDeletedArtists),
-        updatedAt: new Date().toISOString(),
-      });
 
       const saved = saveCatalogFile(
-        healed.catalog.tracks,
-        healed.catalog.playlists,
-        healed.catalog.artists,
+        nextTracks,
+        nextPlaylists,
+        nextArtists,
         {
           deletedTrackIds: Array.from(nextDeletedTracks),
           deletedPlaylistIds: Array.from(nextDeletedPlaylists),
           deletedArtistIds: Array.from(nextDeletedArtists),
         }
       );
-      const syncedSupabase = await syncToSupabaseIfConfigured(saved);
+      broadcastCatalogUpdate(saved.updatedAt);
+      void syncToSupabaseIfConfigured(saved);
 
       res.json({
         success: true,
-        tracks: saved.tracks,
-        playlists: saved.playlists,
-        artists: saved.artists,
         updatedAt: saved.updatedAt,
-        syncedSupabase,
+        syncedSupabase: true,
       });
     } catch (err) {
       console.error('Failed to save permanent catalog:', err);
@@ -1896,8 +2105,13 @@ async function startServer() {
   // POST /api/catalog/reset — Restores default official songs, playlists, and singers on the server
   app.post('/api/catalog/reset', async (_req, res) => {
     try {
-      const saved = saveCatalogFile(INITIAL_TRACKS, INITIAL_PLAYLISTS, INITIAL_ARTISTS);
+      const saved = saveCatalogFile(INITIAL_TRACKS, INITIAL_PLAYLISTS, INITIAL_ARTISTS, {
+        deletedTrackIds: [],
+        deletedPlaylistIds: [],
+        deletedArtistIds: [],
+      });
       await syncToSupabaseIfConfigured(saved);
+      broadcastCatalogUpdate(saved.updatedAt);
       res.json({
         success: true,
         tracks: saved.tracks,
