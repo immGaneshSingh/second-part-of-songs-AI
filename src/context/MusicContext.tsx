@@ -64,7 +64,7 @@ declare global {
 const DEFAULT_DEMO_USER: User = {
   id: 'user-alex-demo',
   name: 'Alex Rivera',
-  email: 'demo@aurastream.io',
+  email: 'demo@melodifi.io',
   password: 'password123',
   avatarUrl: '',
   createdAt: '2024-01-15T00:00:00.000Z',
@@ -189,6 +189,11 @@ interface MusicContextType {
   toggleRepeat: () => void;
   toggleShuffle: () => void;
   toggleLike: (trackId: string) => void;
+  // Sleep Timer
+  sleepTimerRemaining: number | null;
+  sleepTimerOption: number | 'end-of-track' | null;
+  setSleepTimer: (option: number | 'end-of-track' | null) => void;
+  cancelSleepTimer: () => void;
   setActiveView: (view: ActiveView) => void;
   setSearchQuery: (query: string) => void;
   setSelectedGenre: (genre: Genre) => void;
@@ -438,7 +443,7 @@ async function fetchServerPlaylistTracks(
           genre,
           language: genre === 'Bhojpuri' ? 'Bhojpuri' : 'Hindi',
           releaseYear: new Date().getFullYear(),
-          playCount: Math.floor(Math.random() * 400000) + 75000,
+          playCount: 0,
           gradient: 'from-emerald-600 via-teal-800 to-slate-950',
           isOfficial: true,
         }));
@@ -490,7 +495,7 @@ async function fetchServerPlaylistTracks(
               genre,
               language: genre === 'Bhojpuri' ? 'Bhojpuri' : 'Hindi',
               releaseYear: new Date().getFullYear(),
-              playCount: Math.floor(Math.random() * 400000) + 75000,
+              playCount: 0,
               gradient: 'from-emerald-600 via-teal-800 to-slate-950',
               isOfficial: true,
             });
@@ -586,6 +591,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       'ganesh62044',
       'ganesh@62044',
       'admin123',
+      'Melodifi@Admin2026',
       'AuraStream@Admin2026',
     ].filter(Boolean);
 
@@ -1147,6 +1153,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [isQueueOpen, setIsQueueOpen] = useState<boolean>(false);
   const [isLyricsOpen, setIsLyricsOpen] = useState<boolean>(false);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState<boolean>(false);
+  const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
+  const [sleepTimerOption, setSleepTimerOption] = useState<number | 'end-of-track' | null>(null);
+  const sleepTimerOptionRef = useRef<number | 'end-of-track' | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ytPlayerRef = useRef<any>(null);
@@ -1175,7 +1184,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           coverUrl: getYouTubeThumbnail(vid),
           genre: 'Hindi',
           releaseYear: 2025,
-          playCount: 250000,
+          playCount: 0,
           gradient: 'from-emerald-600 via-teal-800 to-slate-950',
           isOfficial: true,
         };
@@ -1540,6 +1549,18 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return next;
       });
 
+      // Increment track.playCount in active tracks state so Trending carousels update dynamically
+      setTracks((prev) =>
+        prev.map((t) => (t.id === track.id ? { ...t, playCount: (t.playCount || 0) + 1 } : t))
+      );
+
+      // Persist play count to database and Supabase
+      fetch('/api/track-played', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId: track.id }),
+      }).catch(() => {});
+
       // Always stop any previous HTML5 audio stream immediately
       if (audioRef.current) {
         audioRef.current.pause();
@@ -1801,7 +1822,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         genre: classification.genre,
         language: classification.language,
         releaseYear: new Date().getFullYear(),
-        playCount: 100000,
+        playCount: 0,
         gradient: 'from-emerald-600 via-teal-800 to-slate-950',
         isOfficial: true,
         createdAt: Date.now(),
@@ -1896,6 +1917,23 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [currentTrack, isPlaying, tracks, playTrack]);
 
   const playNext = useCallback(() => {
+    // If user requested to pause at end of current track
+    if (sleepTimerOptionRef.current === 'end-of-track') {
+      setIsPlaying(false);
+      setPlayerStatus('Paused');
+      if (audioRef.current) audioRef.current.pause();
+      if (isUsingYouTubeIframeRef.current && ytPlayerRef.current?.pauseVideo) {
+        try {
+          ytPlayerRef.current.pauseVideo();
+        } catch {}
+      }
+      setSleepTimerRemaining(null);
+      setSleepTimerOption(null);
+      sleepTimerOptionRef.current = null;
+      showToast('Sleep timer reached end of track. Playback paused.');
+      return;
+    }
+
     if (!currentTrack || queue.length === 0) return;
     const currentIdx = queue.findIndex((t) => t.id === currentTrack.id);
     const nextIdx = getNextTrackIndex(currentIdx, queue.length, shuffle, repeatMode);
@@ -1908,7 +1946,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setCurrentTime(0);
       if (audioRef.current) audioRef.current.pause();
     }
-  }, [currentTrack, queue, shuffle, repeatMode, playTrack]);
+  }, [currentTrack, queue, shuffle, repeatMode, playTrack, showToast]);
 
   useEffect(() => {
     playNextRef.current = playNext;
@@ -2025,6 +2063,90 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setShuffle((prev) => !prev);
   }, []);
 
+  // Android Background Audio Keepalive (Silent Audio Node keeps WebView audio thread alive when screen turns off)
+  const silentKeepAliveRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    try {
+      const silent = new Audio(
+        'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA='
+      );
+      silent.loop = true;
+      silent.volume = 0.001;
+      silentKeepAliveRef.current = silent;
+    } catch {}
+
+    return () => {
+      if (silentKeepAliveRef.current) {
+        silentKeepAliveRef.current.pause();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!silentKeepAliveRef.current) return;
+    if (isPlaying) {
+      silentKeepAliveRef.current.play().catch(() => {});
+    } else {
+      silentKeepAliveRef.current.pause();
+    }
+  }, [isPlaying]);
+
+  // Standard MediaSession API — Controls on Android Notification Bar, Lock Screen & Wearables
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !currentTrack) return;
+
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.title,
+        artist: currentTrack.artist,
+        album: currentTrack.album || 'Melodifi Music',
+        artwork: [
+          { src: currentTrack.coverUrl, sizes: '96x96', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '128x128', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '192x192', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '256x256', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '384x384', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '512x512', type: 'image/jpeg' },
+        ],
+      });
+
+      navigator.mediaSession.setActionHandler('play', () => {
+        togglePlayPause();
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        togglePlayPause();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        playPrev();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        playNext();
+      });
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (details.seekTime !== undefined && details.seekTime !== null) {
+          seek(details.seekTime);
+        }
+      });
+      navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+        const offset = details.seekOffset || 10;
+        seek(Math.max(0, currentTime - offset));
+      });
+      navigator.mediaSession.setActionHandler('seekforward', (details) => {
+        const offset = details.seekOffset || 10;
+        seek(Math.min(duration, currentTime + offset));
+      });
+    } catch (err) {
+      console.warn('MediaSession configuration warning:', err);
+    }
+  }, [currentTrack, togglePlayPause, playNext, playPrev, seek, currentTime, duration]);
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    } catch {}
+  }, [isPlaying]);
+
   const toggleLike = useCallback(
     (trackId: string) => {
       const targetUser = currentUser ? currentUser.id : 'guest';
@@ -2049,6 +2171,70 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     },
     [currentUser, likedStore, tracks, queue, showToast]
   );
+
+  // Sleep Timer Handlers
+  const cancelSleepTimer = useCallback(() => {
+    setSleepTimerRemaining(null);
+    setSleepTimerOption(null);
+    sleepTimerOptionRef.current = null;
+    showToast('Sleep timer turned off');
+  }, [showToast]);
+
+  const setSleepTimer = useCallback(
+    (option: number | 'end-of-track' | null) => {
+      if (option === null) {
+        setSleepTimerRemaining(null);
+        setSleepTimerOption(null);
+        sleepTimerOptionRef.current = null;
+        showToast('Sleep timer turned off');
+        return;
+      }
+
+      if (option === 'end-of-track') {
+        setSleepTimerOption('end-of-track');
+        sleepTimerOptionRef.current = 'end-of-track';
+        const remSecs = Math.max(5, Math.round(duration - currentTime));
+        setSleepTimerRemaining(remSecs);
+        showToast('Sleep timer: Stopping at end of track');
+        return;
+      }
+
+      const mins = Math.max(1, Math.round(option));
+      setSleepTimerOption(mins);
+      sleepTimerOptionRef.current = mins;
+      setSleepTimerRemaining(mins * 60);
+      showToast(`Sleep timer set for ${mins} minute${mins > 1 ? 's' : ''}`);
+    },
+    [duration, currentTime, showToast]
+  );
+
+  // Countdown timer effect
+  useEffect(() => {
+    if (sleepTimerRemaining === null) return;
+
+    if (sleepTimerRemaining <= 0) {
+      if (isPlaying) {
+        togglePlayPause();
+      }
+      setSleepTimerRemaining(null);
+      setSleepTimerOption(null);
+      sleepTimerOptionRef.current = null;
+      showToast('Sleep timer ended. Playback paused. Sweet dreams!');
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setSleepTimerRemaining((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [sleepTimerRemaining, isPlaying, togglePlayPause, showToast]);
 
   const toggleQueue = useCallback(() => {
     setIsQueueOpen((prev) => !prev);
@@ -2565,7 +2751,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               genre: trackGenre,
               language: aiInfo.language,
               releaseYear: new Date().getFullYear(),
-              playCount: 150000,
+              playCount: 0,
               gradient: 'from-emerald-600 via-teal-800 to-slate-950',
               isOfficial: true,
               createdAt: uploadTs,
@@ -2980,9 +3166,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         artist: finalArtistName,
         id: existingTrack?.id || trackData.id || `track-custom-${Date.now()}`,
         playCount:
-          trackData.playCount ||
-          existingTrack?.playCount ||
-          Math.floor(Math.random() * 500000) + 10000,
+          typeof trackData.playCount === 'number'
+            ? trackData.playCount
+            : (existingTrack?.playCount ?? 0),
         gradient:
           trackData.gradient ||
           existingTrack?.gradient ||
@@ -3416,7 +3602,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 ? 'English'
                 : 'Hindi',
               releaseYear: new Date().getFullYear(),
-              playCount: Math.floor(Math.random() * 400000) + 50000,
+              playCount: 0,
               gradient: 'from-amber-600 via-rose-600 to-indigo-950',
               isOfficial: true,
               createdAt: itemTs,
@@ -3935,7 +4121,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         gradient: artistData.gradient || 'from-amber-600 via-rose-600 to-indigo-950',
         verified: artistData.verified ?? true,
         monthlyListeners: artistData.monthlyListeners || '1.2M',
-        bio: artistData.bio || `${cleanName} official playback artist profile on AuraStream.`,
+        bio: artistData.bio || `${cleanName} official playback artist profile on Melodifi.`,
         createdAt: nextTs,
         ...( { isAdminCreated: true } as any ),
       };
@@ -4223,6 +4409,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         toggleRepeat,
         toggleShuffle,
         toggleLike,
+        sleepTimerRemaining,
+        sleepTimerOption,
+        setSleepTimer,
+        cancelSleepTimer,
         setActiveView,
         setSearchQuery,
         setSelectedGenre,

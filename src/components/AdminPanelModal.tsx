@@ -54,6 +54,7 @@ import { useMusic } from '../context/MusicContext.tsx';
 import type { Genre, HomeSection, Playlist, Artist } from '../types/music.ts';
 import {
   formatTime,
+  formatPlayCount,
   resolveTrackSection,
   resolveTrackArtist,
   resolvePlaylistSection,
@@ -650,7 +651,7 @@ export const AdminPanelModal: React.FC = () => {
       genre: finalGenre,
       language: finalLanguage,
       releaseYear: new Date().getFullYear(),
-      playCount: Math.floor(Math.random() * 500000) + 50000,
+      playCount: 0,
       gradient: 'from-amber-600 via-rose-600 to-indigo-950',
       isOfficial,
     });
@@ -740,7 +741,7 @@ export const AdminPanelModal: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'aurastream-catalog-backup.json';
+    a.download = 'melodifi-catalog-backup.json';
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -906,7 +907,7 @@ export const AdminPanelModal: React.FC = () => {
               Protected Owner Access
             </span>
             <h2 className="text-xl font-extrabold text-white tracking-tight">
-              AuraStream Admin Gateway
+              Melodifi Admin Gateway
             </h2>
             <p className="text-xs text-slate-400 mt-1 max-w-xs">
               Exclusive YouTube Song & Playlist Manager · Protected Owner Access
@@ -974,7 +975,7 @@ export const AdminPanelModal: React.FC = () => {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h2 className="text-sm sm:text-base font-extrabold text-white tracking-tight truncate">
-                  AuraStream Admin Studio
+                  Melodifi Admin Studio
                 </h2>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
                   Live Sync
@@ -2965,7 +2966,7 @@ export const AdminPanelModal: React.FC = () => {
                                         coverUrl: info.thumbnail || getYouTubeThumbnail(info.videoId),
                                         releaseYear: new Date().getFullYear(),
                                         createdAt: Date.now(),
-                                        playCount: Math.floor(Math.random() * 200000) + 50000,
+                                        playCount: 0,
                                         gradient: singer.gradient || 'from-amber-600 via-rose-600 to-indigo-950',
                                       });
                                       setAssignYtUrl('');
@@ -3027,7 +3028,7 @@ export const AdminPanelModal: React.FC = () => {
                                               {song.title}
                                             </p>
                                             <p className="text-[10px] text-slate-400 truncate">
-                                              {formatTime(song.duration)} · {(song.playCount / 1000).toFixed(0)}K plays
+                                              {formatTime(song.duration)} · {formatPlayCount(song.playCount || 0)}
                                             </p>
                                           </div>
                                         </div>

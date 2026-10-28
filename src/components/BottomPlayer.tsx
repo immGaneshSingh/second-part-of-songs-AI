@@ -14,6 +14,10 @@ import {
   ListMusic,
   Radio,
   ChevronDown,
+  Moon,
+  Clock,
+  Check,
+  X,
 } from 'lucide-react';
 import { useMusic } from '../context/MusicContext.tsx';
 import {
@@ -49,12 +53,29 @@ export const BottomPlayer: React.FC = () => {
     toggleQueue,
     isPlayerOpen,
     setIsPlayerOpen,
+    sleepTimerRemaining,
+    sleepTimerOption,
+    setSleepTimer,
+    cancelSleepTimer,
   } = useMusic();
 
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [scrubValue, setScrubValue] = useState(0);
+  const [isSleepTimerOpen, setIsSleepTimerOpen] = useState(false);
+  const [customMinutes, setCustomMinutes] = useState('');
   const scrubBarRef = useRef<HTMLDivElement>(null);
   const mobileScrubBarRef = useRef<HTMLDivElement>(null);
+
+  const formatSleepTimer = (secs: number): string => {
+    if (secs <= 0) return '0:00';
+    const hours = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const remainingSeconds = secs % 60;
+    if (hours > 0) {
+      return `${hours}:${String(mins).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+    }
+    return `${mins}:${String(remainingSeconds).padStart(2, '0')}`;
+  };
 
   // Hidden inside the Guitar Logo until user clicks the Guitar Logo once
   if (!currentTrack || !isPlayerOpen) {
@@ -225,6 +246,29 @@ export const BottomPlayer: React.FC = () => {
                 aria-label={isLiked ? 'Unlike song' : 'Like song'}
               >
                 <Heart className={`w-4 h-4 ${isLiked ? 'fill-rose-500 text-rose-500' : ''}`} />
+              </button>
+
+              {/* Sleep Timer Button (Mobile & Tablet) */}
+              <button
+                onClick={() => setIsSleepTimerOpen((prev) => !prev)}
+                className={`w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-xl transition-all shrink-0 cursor-pointer relative ${
+                  sleepTimerRemaining !== null
+                    ? 'text-emerald-400 bg-emerald-500/20 border border-emerald-500/50 shadow-sm shadow-emerald-500/25 ring-1 ring-emerald-500/40'
+                    : 'text-slate-400 hover:text-white bg-slate-900/80 border border-slate-800 hover:bg-slate-800'
+                }`}
+                title={
+                  sleepTimerRemaining !== null
+                    ? `Sleep timer active: ${formatSleepTimer(sleepTimerRemaining)} left`
+                    : 'Sleep Timer'
+                }
+                aria-label="Sleep timer"
+              >
+                <Moon className={`w-4 h-4 ${sleepTimerRemaining !== null ? 'fill-emerald-400 text-emerald-400' : ''}`} />
+                {sleepTimerRemaining !== null && (
+                  <span className="absolute -top-1 -right-1 px-1 py-0.2 bg-emerald-500 text-slate-950 font-extrabold text-[8px] rounded-full shadow-sm font-mono leading-tight">
+                    {Math.ceil(sleepTimerRemaining / 60)}m
+                  </span>
+                )}
               </button>
 
               {/* Minimize back into Guitar Logo */}
@@ -419,8 +463,33 @@ export const BottomPlayer: React.FC = () => {
             </div>
           </div>
 
-          {/* Desktop Right Section: Queue, Volume & Hide */}
+          {/* Desktop Right Section: Sleep Timer, Queue, Volume & Hide */}
           <div className="hidden md:flex items-center justify-end gap-2 md:w-1/3">
+            {/* Desktop Sleep Timer Button */}
+            <button
+              onClick={() => setIsSleepTimerOpen((prev) => !prev)}
+              className={`min-h-[40px] px-2.5 flex items-center gap-1.5 rounded-xl transition-all cursor-pointer ${
+                sleepTimerRemaining !== null
+                  ? 'text-emerald-300 bg-emerald-500/20 border border-emerald-500/40 shadow-sm shadow-emerald-500/20'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+              title={
+                sleepTimerRemaining !== null
+                  ? `Sleep timer active: ${formatSleepTimer(sleepTimerRemaining)} remaining`
+                  : 'Sleep Timer'
+              }
+              aria-label="Sleep timer"
+            >
+              <Moon className={`w-4 h-4 ${sleepTimerRemaining !== null ? 'fill-emerald-400 text-emerald-400' : ''}`} />
+              {sleepTimerRemaining !== null ? (
+                <span className="text-[11px] font-mono font-bold text-emerald-300">
+                  {formatSleepTimer(sleepTimerRemaining)}
+                </span>
+              ) : (
+                <span className="text-xs hidden xl:inline font-medium">Timer</span>
+              )}
+            </button>
+
             <button
               onClick={toggleQueue}
               className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl transition-colors cursor-pointer ${
@@ -465,6 +534,170 @@ export const BottomPlayer: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Sleep Timer Popover / Modal Dialog */}
+      {isSleepTimerOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setIsSleepTimerOpen(false)}
+        >
+          <div
+            className="w-full sm:max-w-md bg-[#0d1019] border border-slate-800/90 rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden p-5 sm:p-6 text-slate-100 animate-in slide-in-from-bottom-5 duration-200 select-none"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3.5 border-b border-slate-800/80">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-emerald-500 via-teal-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+                  <Moon className="w-5 h-5 text-slate-950 fill-slate-950" />
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-white">Sleep Timer</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Automatically pauses Melodifi when you fall asleep
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsSleepTimerOpen(false)}
+                className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800/80 transition-colors cursor-pointer"
+                aria-label="Close sleep timer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* If a timer is currently active */}
+            {sleepTimerRemaining !== null && (
+              <div className="my-4 p-3.5 rounded-2xl bg-gradient-to-r from-emerald-500/15 via-teal-500/10 to-slate-900 border border-emerald-500/30 flex items-center justify-between gap-3 shadow-inner">
+                <div className="min-w-0">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block">
+                    Active Countdown
+                  </span>
+                  <p className="text-xl font-mono font-extrabold text-white mt-0.5 tracking-tight">
+                    {formatSleepTimer(sleepTimerRemaining)}
+                  </p>
+                  <p className="text-[11px] text-slate-400 truncate">
+                    {sleepTimerOption === 'end-of-track'
+                      ? 'Stopping when current song finishes'
+                      : `Set for ${sleepTimerOption} mins`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => {
+                      if (typeof sleepTimerOption === 'number') {
+                        setSleepTimer(sleepTimerOption + 5);
+                      } else {
+                        setSleepTimer(5);
+                      }
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
+                    title="Add 5 minutes"
+                  >
+                    +5m
+                  </button>
+                  <button
+                    onClick={() => {
+                      cancelSleepTimer();
+                      setIsSleepTimerOpen(false);
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500 text-rose-300 hover:text-white text-xs font-bold transition-all border border-rose-500/30 cursor-pointer"
+                  >
+                    Turn Off
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Presets Grid */}
+            <div className="mt-4">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2.5">
+                Set Timer Duration
+              </span>
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                {[5, 10, 15, 30, 45, 60].map((mins) => {
+                  const isSelected = sleepTimerOption === mins;
+                  return (
+                    <button
+                      key={`timer-preset-${mins}`}
+                      onClick={() => {
+                        setSleepTimer(mins);
+                        setIsSleepTimerOpen(false);
+                      }}
+                      className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-bold shadow-md shadow-emerald-500/20 scale-102 ring-1 ring-white/20'
+                          : 'bg-slate-900/80 hover:bg-slate-800 text-slate-200 border-slate-800/80 hover:border-slate-700'
+                      }`}
+                    >
+                      <span className="text-sm font-extrabold block">{mins}</span>
+                      <span className="text-[10px] opacity-80 block">minutes</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* End of Track Option */}
+              <button
+                onClick={() => {
+                  setSleepTimer('end-of-track');
+                  setIsSleepTimerOpen(false);
+                }}
+                className={`w-full mt-2.5 p-3 rounded-xl border flex items-center justify-between transition-all cursor-pointer ${
+                  sleepTimerOption === 'end-of-track'
+                    ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-bold shadow-md shadow-emerald-500/20'
+                    : 'bg-slate-900/80 hover:bg-slate-800 text-slate-200 border-slate-800/80 hover:border-slate-700'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                  <div className="text-left">
+                    <span className="text-xs font-bold block">End of Current Track</span>
+                    <span className="text-[10px] text-slate-400 block truncate max-w-[240px]">
+                      {duration > 0 && currentTime < duration
+                        ? `Pauses in ~${Math.ceil((duration - currentTime) / 60)} min (${cleanTitle})`
+                        : 'Pauses when track finishes'}
+                    </span>
+                  </div>
+                </div>
+                {sleepTimerOption === 'end-of-track' && <Check className="w-4 h-4" />}
+              </button>
+
+              {/* Custom Minutes Input */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const val = parseInt(customMinutes, 10);
+                  if (!isNaN(val) && val > 0) {
+                    setSleepTimer(val);
+                    setCustomMinutes('');
+                    setIsSleepTimerOpen(false);
+                  }
+                }}
+                className="mt-3 flex items-center gap-2"
+              >
+                <input
+                  type="number"
+                  min="1"
+                  max="480"
+                  value={customMinutes}
+                  onChange={(e) => setCustomMinutes(e.target.value)}
+                  placeholder="Custom minutes (e.g. 20, 90)..."
+                  className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="submit"
+                  disabled={!customMinutes || parseInt(customMinutes, 10) <= 0}
+                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:hover:bg-emerald-500 text-slate-950 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                >
+                  Set
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

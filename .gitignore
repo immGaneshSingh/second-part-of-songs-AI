@@ -6,6 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+data/supabase-config.json
+data/*.backup.json
 .aistudio/
 .antigravity/
 .tempmediaStorage/

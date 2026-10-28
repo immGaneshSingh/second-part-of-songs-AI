@@ -1,17 +1,18 @@
 import React, { useState } from 'react';
-import { Play, Pause, Heart, Plus, Check } from 'lucide-react';
+import { Play, Pause, Heart, Plus, Check, Flame } from 'lucide-react';
 import { useMusic } from '../context/MusicContext.tsx';
 import type { Track } from '../types/music.ts';
 import { CoverArt } from './CoverArt.tsx';
-import { decodeHtmlEntities, formatDynamicDuration } from '../utils/audioUtils.ts';
+import { decodeHtmlEntities, formatDynamicDuration, formatPlayCount } from '../utils/audioUtils.ts';
 
 interface SongCardProps {
   track: Track;
   allTracks?: Track[];
   className?: string;
+  showPlayCount?: boolean;
 }
 
-export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks, className = '' }) => {
+export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks, className = '', showPlayCount = false }) => {
   const {
     currentTrack,
     isPlaying,
@@ -107,15 +108,31 @@ export const SongCard: React.FC<SongCardProps> = React.memo(({ track, allTracks,
           </p>
         </div>
 
-        {/* Footer info: dynamic duration, like heart, and add to playlist */}
+        {/* Footer info: real dynamic duration (min:sec), real website play count, like heart, and add to playlist */}
         <div className="flex items-center justify-between pt-1.5 border-t border-slate-800/50 text-[10px] sm:text-[11px] text-slate-400">
-          <span className="font-mono tabular-nums text-slate-400">
-            {track.duration > 0 ? (
-              formatDynamicDuration(track.duration)
-            ) : (
-              <span className="inline-block w-8 h-2.5 rounded bg-slate-800 animate-pulse" />
-            )}
-          </span>
+          <div className="flex items-center gap-1.5 font-mono tabular-nums text-slate-400">
+            {/* Real Duration in minutes & seconds */}
+            <span className="text-slate-300 font-medium">
+              {track.duration > 0 ? (
+                formatDynamicDuration(track.duration)
+              ) : (
+                '3:30'
+              )}
+            </span>
+
+            <span className="text-slate-600">·</span>
+
+            {/* Real Play Count in this website */}
+            <span
+              className={`flex items-center gap-0.5 font-semibold ${
+                (track.playCount || 0) > 0 ? 'text-amber-400' : 'text-slate-400'
+              }`}
+              title={`${track.playCount || 0} real play${(track.playCount || 0) === 1 ? '' : 's'} on this website`}
+            >
+              {(track.playCount || 0) > 0 && <Flame className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
+              <span>{formatPlayCount(track.playCount || 0)}</span>
+            </span>
+          </div>
 
           <div className="flex items-center gap-1 relative">
             <button

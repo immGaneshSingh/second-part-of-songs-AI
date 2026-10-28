@@ -51,6 +51,7 @@ import {
   SlidersHorizontal,
   Home,
   X,
+  TrendingUp,
 } from 'lucide-react';
 import type { Track, Playlist, Genre, HomeSection } from './types/music.ts';
 
@@ -112,6 +113,23 @@ function MainContent() {
   const bhojpuriTracks = useMemo(() => getSectionTracks(tracks, 'bhojpuri'), [tracks]);
   const bhaktiTracks = useMemo(() => getSectionTracks(tracks, 'bhakti'), [tracks]);
   const englishTracks = useMemo(() => getSectionTracks(tracks, 'english'), [tracks]);
+
+  // Trending in Genre tracks based on play counts stored in Supabase
+  const trendingHindiTracks = useMemo(() => {
+    return [...hindiTracks].sort((a, b) => (b.playCount || 0) - (a.playCount || 0));
+  }, [hindiTracks]);
+
+  const trendingBhojpuriTracks = useMemo(() => {
+    return [...bhojpuriTracks].sort((a, b) => (b.playCount || 0) - (a.playCount || 0));
+  }, [bhojpuriTracks]);
+
+  const trendingBhaktiTracks = useMemo(() => {
+    return [...bhaktiTracks].sort((a, b) => (b.playCount || 0) - (a.playCount || 0));
+  }, [bhaktiTracks]);
+
+  const trendingEnglishTracks = useMemo(() => {
+    return [...englishTracks].sort((a, b) => (b.playCount || 0) - (a.playCount || 0));
+  }, [englishTracks]);
 
   // Latest playlists first so newly uploaded playlists show immediately at the beginning
   const latestPlaylists = useMemo(() => {
@@ -368,7 +386,7 @@ function MainContent() {
               }}
               onMoreClick={() => setShowSectionManager((prev) => !prev)}
               moreTooltip="Manage song placements in this section"
-              metaText={`${cfg.tracksList.length} songs · ${sectionPlaylists.length} playlists · Curated by AuraStream`}
+              metaText={`${cfg.tracksList.length} songs · ${sectionPlaylists.length} playlists · Curated by Melodifi`}
               className="mt-4 sm:mt-5"
             />
           </div>
@@ -836,7 +854,7 @@ function MainContent() {
                   }}
                   onMoreClick={activePlaylist.isCustom ? () => setPlaylistToEdit(activePlaylist) : undefined}
                   moreTooltip="Edit playlist"
-                  metaText={`${activePlaylistTracks.length} songs · Curated by AuraStream`}
+                  metaText={`${activePlaylistTracks.length} songs · Curated by Melodifi`}
                 />
               </div>
             </div>
@@ -1130,100 +1148,104 @@ function MainContent() {
               ))}
             </HorizontalCarousel>
 
-            {/* SECTION 1: Bollywood & Hindi Superhits (2 compact cards visible side-by-side on mobile) */}
+            {/* SECTION 1: Bollywood & Hindi Superhits (Trending by Real App Plays) */}
             <div data-testid="home-section-1-hindi">
               <HorizontalCarousel
                 id="sec1-hindi"
-                title="Bollywood & Hindi Superhits"
-                subtitle="Top Bollywood film soundtracks, soulful melodies, and chartbusters"
-                icon={<span className="text-xl">🇮🇳</span>}
+                title="Bollywood & Hindi Superhits 🔥"
+                subtitle="Top Bollywood film soundtracks & Hindi songs ranked by real plays on this app"
+                icon={<TrendingUp className="w-5 h-5 text-rose-400" />}
                 seeAllLabel={`See all (${hindiTracks.length}) →`}
                 onSeeAll={() => {
                   setActiveView('hindi');
                   playSection('hindi', 'sequential');
                 }}
-                className="animate-fade-slide-up [animation-delay:75ms]"
+                className="animate-fade-slide-up [animation-delay:60ms]"
               >
-                {hindiTracks.slice(0, 24).map((track) => (
+                {trendingHindiTracks.slice(0, 24).map((track) => (
                   <SongCard
-                    key={`sec1-hindi-${track.id}-${track.createdAt || 0}`}
+                    key={`trend-hindi-${track.id}-${track.playCount || 0}`}
                     track={track}
-                    allTracks={hindiTracks}
+                    allTracks={trendingHindiTracks}
+                    showPlayCount={true}
                     className="w-[calc(50%-6px)] sm:w-44 md:w-48 shrink-0 snap-start"
                   />
                 ))}
               </HorizontalCarousel>
             </div>
 
-            {/* SECTION 2: Bhojpuri Desi Dhamaka & Folk Beats */}
+            {/* SECTION 2: Bhojpuri Desi Dhamaka (Trending by Real App Plays) */}
             <div data-testid="home-section-2-bhojpuri">
               <HorizontalCarousel
                 id="sec2-bhojpuri"
-                title="Bhojpuri Desi Dhamaka & Folk Beats"
-                subtitle="High-voltage dance anthems, DJ folk beats, and rural chart-toppers"
+                title="Bhojpuri Desi Dhamaka 🔥"
+                subtitle="High-voltage dance anthems, DJ folk beats & chart-toppers ranked by real plays"
                 icon={<Flame className="w-5 h-5 text-orange-400" />}
                 seeAllLabel={`See all (${bhojpuriTracks.length}) →`}
                 onSeeAll={() => {
                   setActiveView('bhojpuri');
                   playSection('bhojpuri', 'sequential');
                 }}
-                className="animate-fade-slide-up [animation-delay:150ms]"
+                className="animate-fade-slide-up [animation-delay:120ms]"
               >
-                {bhojpuriTracks.slice(0, 24).map((track) => (
+                {trendingBhojpuriTracks.slice(0, 24).map((track) => (
                   <SongCard
-                    key={`sec2-bhoj-${track.id}-${track.createdAt || 0}`}
+                    key={`trend-bhoj-${track.id}-${track.playCount || 0}`}
                     track={track}
-                    allTracks={bhojpuriTracks}
+                    allTracks={trendingBhojpuriTracks}
+                    showPlayCount={true}
                     className="w-[calc(50%-6px)] sm:w-44 md:w-48 shrink-0 snap-start"
                   />
                 ))}
               </HorizontalCarousel>
             </div>
 
-            {/* SECTION 3: Bhakti Bhavana */}
+            {/* SECTION 3: Bhakti Bhavana (Trending by Real App Plays) */}
             <div data-testid="home-section-3-bhakti">
               <HorizontalCarousel
                 id="sec3-bhakti"
-                title="Bhakti Bhavana"
-                subtitle="Devotional God songs, Hanuman Chalisa, Shiv Tandav, and divine morning bhajans"
+                title="Bhakti Bhavana ✨"
+                subtitle="Devotional God songs, Hanuman Chalisa & morning bhajans ranked by real plays"
                 icon={<Sparkles className="w-5 h-5 text-yellow-400" />}
                 seeAllLabel={`See all (${bhaktiTracks.length}) →`}
                 onSeeAll={() => {
                   setActiveView('bhakti');
                   playSection('bhakti', 'sequential');
                 }}
-                className="animate-fade-slide-up [animation-delay:225ms]"
+                className="animate-fade-slide-up [animation-delay:180ms]"
               >
-                {bhaktiTracks.slice(0, 24).map((track) => (
+                {trendingBhaktiTracks.slice(0, 24).map((track) => (
                   <SongCard
-                    key={`sec3-bhakti-${track.id}-${track.createdAt || 0}`}
+                    key={`trend-bhakti-${track.id}-${track.playCount || 0}`}
                     track={track}
-                    allTracks={bhaktiTracks}
+                    allTracks={trendingBhaktiTracks}
+                    showPlayCount={true}
                     className="w-[calc(50%-6px)] sm:w-44 md:w-48 shrink-0 snap-start"
                   />
                 ))}
               </HorizontalCarousel>
             </div>
 
-            {/* SECTION 4: English Songs */}
+            {/* SECTION 4: English & Global Hits (Trending by Real App Plays) */}
             <div data-testid="home-section-4-english">
               <HorizontalCarousel
                 id="sec4-english"
-                title="English Songs"
-                subtitle="Global pop anthems, billboard hits, synthwave, and international chartbusters"
+                title="English & Global Hits 🌍"
+                subtitle="Global pop anthems, billboard hits & synthwave tracks ranked by real plays"
                 icon={<Globe className="w-5 h-5 text-cyan-400" />}
                 seeAllLabel={`See all (${englishTracks.length}) →`}
                 onSeeAll={() => {
                   setActiveView('english');
                   playSection('english', 'sequential');
                 }}
-                className="animate-fade-slide-up [animation-delay:300ms]"
+                className="animate-fade-slide-up [animation-delay:240ms]"
               >
-                {englishTracks.slice(0, 24).map((track) => (
+                {trendingEnglishTracks.slice(0, 24).map((track) => (
                   <SongCard
-                    key={`sec4-english-${track.id}-${track.createdAt || 0}`}
+                    key={`trend-eng-${track.id}-${track.playCount || 0}`}
                     track={track}
-                    allTracks={englishTracks}
+                    allTracks={trendingEnglishTracks}
+                    showPlayCount={true}
                     className="w-[calc(50%-6px)] sm:w-44 md:w-48 shrink-0 snap-start"
                   />
                 ))}
@@ -1320,28 +1342,7 @@ function MainContent() {
           <Search className="w-4 h-4" />
           <span className="text-[10px] font-semibold mt-0.5">Browse</span>
         </button>
-        <button
-          onClick={() => setActiveView('artists')}
-          className={`min-h-[46px] flex flex-col items-center justify-center py-1 rounded-xl transition-colors cursor-pointer ${
-            activeView === 'artists' || activeView.startsWith('artist-')
-              ? 'text-emerald-400 font-bold'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Mic2 className="w-4 h-4" />
-          <span className="text-[10px] font-semibold mt-0.5">Singers</span>
-        </button>
-        <button
-          onClick={() => setActiveView('library')}
-          className={`min-h-[46px] flex flex-col items-center justify-center py-1 rounded-xl transition-colors cursor-pointer ${
-            activeView === 'library' || activeView.startsWith('playlist-')
-              ? 'text-emerald-400 font-bold'
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <Library className="w-4 h-4" />
-          <span className="text-[10px] font-semibold mt-0.5">Playlists</span>
-        </button>
+        {/* 3. Player: Swapped to position 3 with Guitar Logo, Player toggle & 3-click Admin feature */}
         <button
           onClick={triggerLogoClick}
           className={`min-h-[46px] flex flex-col items-center justify-center py-1 rounded-xl transition-all cursor-pointer relative ${
@@ -1358,6 +1359,34 @@ function MainContent() {
           <span className="text-[10px] font-semibold mt-0.5">
             {isPlayerOpen ? 'Hide' : 'Player'}
           </span>
+        </button>
+
+        {/* 4. Playlists */}
+        <button
+          onClick={() => setActiveView('library')}
+          className={`min-h-[46px] flex flex-col items-center justify-center py-1 rounded-xl transition-colors cursor-pointer ${
+            activeView === 'library' || activeView.startsWith('playlist-')
+              ? 'text-emerald-400 font-bold'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Library className="w-4 h-4" />
+          <span className="text-[10px] font-semibold mt-0.5">Playlists</span>
+        </button>
+
+        {/* 5. Singers: Swapped to position 5 with Mic2 Logo & View Singers feature */}
+        <button
+          onClick={() => setActiveView('artists')}
+          className={`min-h-[46px] flex flex-col items-center justify-center py-1 rounded-xl transition-colors cursor-pointer ${
+            activeView === 'artists' || activeView.startsWith('artist-')
+              ? 'text-emerald-400 font-bold'
+              : 'text-slate-400 hover:text-white'
+          }`}
+          title="View All Singers & Artists"
+          aria-label="Singers and Artists"
+        >
+          <Mic2 className="w-4 h-4" />
+          <span className="text-[10px] font-semibold mt-0.5">Singers</span>
         </button>
       </nav>
 

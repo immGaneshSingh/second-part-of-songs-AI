@@ -1364,6 +1364,20 @@ export function getTopPlayedTodayTracks(
 }
 
 /**
+ * Formats numeric play counts to compact human-readable format (e.g. 245K plays, 1.2M plays)
+ */
+export function formatPlayCount(count?: number): string {
+  if (!count || count <= 0) return '0 plays';
+  if (count >= 1000000) {
+    return `${(count / 1000000).toFixed(1).replace(/\.0$/, '')}M plays`;
+  }
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(0)}K plays`;
+  }
+  return `${count} plays`;
+}
+
+/**
  * Resolves which of the 4 core sections (1: hindi, 2: bhojpuri, 3: bhakti, 4: english)
  * a Playlist belongs to so every playlist shows in one specific section between 1 to 4.
  */

@@ -33,7 +33,7 @@ export const GuitarLogo: React.FC<GuitarLogoProps> = ({
       className={`flex items-center gap-3 select-none transition-all ${
         onClick ? 'cursor-pointer active:scale-95 group' : ''
       } ${className}`}
-      title={onClick ? 'AuraStream Music' : undefined}
+      title={onClick ? 'Melodifi Music' : undefined}
     >
       {/* Stylized Guitar Emblem Icon */}
       <div
@@ -120,7 +120,7 @@ export const GuitarLogo: React.FC<GuitarLogoProps> = ({
       {showText && (
         <div className="block">
           <span className="text-sm sm:text-lg font-extrabold tracking-tight text-white block leading-tight">
-            AuraStream
+            Melodifi
           </span>
           <span className="hidden sm:block text-[11px] text-emerald-400/90 font-medium tracking-wide">
             {subtext}

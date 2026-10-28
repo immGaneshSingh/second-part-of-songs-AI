@@ -31,7 +31,7 @@ export const AuthModal: React.FC = () => {
 
   const handleUseDemo = () => {
     setError(null);
-    login('demo@aurastream.io', 'password123');
+    login('demo@melodifi.io', 'password123');
   };
 
   return (
@@ -49,7 +49,7 @@ export const AuthModal: React.FC = () => {
             <p className="text-xs text-slate-400 mt-0.5">
               {mode === 'login'
                 ? 'Sign in to access your saved liked songs and playlists.'
-                : 'Join AuraStream to sync your library across sessions.'}
+                : 'Join Melodifi to sync your library across sessions.'}
             </p>
           </div>
           <button
@@ -184,7 +184,7 @@ export const AuthModal: React.FC = () => {
             type="submit"
             className="w-full py-3 mt-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl shadow-lg shadow-emerald-500/20 text-xs sm:text-sm transition-all transform active:scale-98"
           >
-            {mode === 'login' ? 'Sign In to AuraStream' : 'Create Free Account'}
+            {mode === 'login' ? 'Sign In to Melodifi' : 'Create Free Account'}
           </button>
         </form>
 

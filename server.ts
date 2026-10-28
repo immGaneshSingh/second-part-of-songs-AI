@@ -221,18 +221,33 @@ function normalizeSupabaseUrl(rawUrl?: string): string {
 }
 
 function getSupabaseCredentials(): { url: string; key: string; anonKey: string } | null {
-  const rawUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.trim();
-  const rawAnon = (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY)?.trim();
-  const rawService = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-
   const isPlaceholder = (val?: string) =>
     !val ||
     val.includes('your-project.supabase.co') ||
     val.includes('your_project') ||
     val.includes('example.com') ||
     val.includes('your-anon-key') ||
+    val.includes('your_supabase_anon_key') ||
+    val.includes('your_supabase_service_role_key') ||
     val.includes('your-service-role-key') ||
     val === 'placeholder';
+
+  let rawUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)?.trim();
+  let rawAnon = (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY)?.trim();
+  let rawService = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+
+  // If process.env has placeholder or empty strings, load from data/supabase-config.json (safely ignored by git)
+  if (isPlaceholder(rawUrl) || (isPlaceholder(rawAnon) && isPlaceholder(rawService))) {
+    try {
+      const configPath = path.join(DATA_DIR, 'supabase-config.json');
+      if (fs.existsSync(configPath)) {
+        const fileContent = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        rawUrl = fileContent.url || fileContent.SUPABASE_URL;
+        rawAnon = fileContent.anonKey || fileContent.SUPABASE_ANON_KEY;
+        rawService = fileContent.serviceRoleKey || fileContent.SUPABASE_SERVICE_ROLE_KEY;
+      }
+    } catch {}
+  }
 
   const url = normalizeSupabaseUrl(!isPlaceholder(rawUrl) ? rawUrl : '');
   const anonKey = !isPlaceholder(rawAnon) ? rawAnon! : '';
@@ -300,45 +315,49 @@ async function syncToSupabaseIfConfigured(catalog: StoredCatalog): Promise<boole
     syncedMain = false;
   }
 
-  // Also sync individual relational tables (artists, playlists, and recent songs) in background so Supabase Table Editor & Realtime .on() listeners fire immediately
+  // Also sync individual relational tables (artists, playlists, and songs) in background so Supabase Table Editor & Realtime .on() listeners fire immediately
   void (async () => {
     try {
-      const artistRows = (catalog.artists || INITIAL_ARTISTS).map((a) => ({
-        id: a.id,
-        name: a.name,
-        language: a.language || 'Hindi',
-        role: a.role || null,
-        data: a,
-        updated_at: catalog.updatedAt,
-      }));
-      if (artistRows.length > 0) {
+      const allArtists = catalog.artists && catalog.artists.length > 0 ? catalog.artists : INITIAL_ARTISTS;
+      for (let i = 0; i < allArtists.length; i += 50) {
+        const chunk = allArtists.slice(i, i + 50);
+        const artistRows = chunk.map((a) => ({
+          id: a.id,
+          name: a.name,
+          language: a.language || 'Hindi',
+          role: a.role || null,
+          data: a,
+          updated_at: catalog.updatedAt,
+        }));
         await supabase.from('artists').upsert(artistRows, { onConflict: 'id' });
       }
 
-      const playlistRows = catalog.playlists.map((p) => ({
-        id: p.id,
-        name: p.name,
-        section: p.section || 'hindi',
-        artist_name: p.artistName || null,
-        data: p,
-        updated_at: catalog.updatedAt,
-      }));
-      if (playlistRows.length > 0) {
+      for (let i = 0; i < catalog.playlists.length; i += 50) {
+        const chunk = catalog.playlists.slice(i, i + 50);
+        const playlistRows = chunk.map((p) => ({
+          id: p.id,
+          name: p.name,
+          section: p.section || 'hindi',
+          artist_name: p.artistName || null,
+          data: p,
+          updated_at: catalog.updatedAt,
+        }));
         await supabase.from('playlists').upsert(playlistRows, { onConflict: 'id' });
       }
 
-      // Upsert the latest 120 songs (newly uploaded/modified tracks are sorted first) for ultra-fast real-time sync without lyrics
-      const recentTracks = catalog.tracks.slice(0, 120);
-      const songRows = recentTracks.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => ({
-        id: t.id,
-        title: t.title,
-        artist: t.artist,
-        section: t.section || 'hindi',
-        youtube_id: t.youtubeId || null,
-        data: t,
-        updated_at: catalog.updatedAt,
-      }));
-      if (songRows.length > 0) {
+      // Upsert the latest 250 songs for immediate real-time updates and full table presence
+      const recentTracks = catalog.tracks.slice(0, 250);
+      for (let i = 0; i < recentTracks.length; i += 50) {
+        const chunk = recentTracks.slice(i, i + 50);
+        const songRows = chunk.map(({ lyrics: _l, devanagariLyrics: _dl, ...t }) => ({
+          id: t.id,
+          title: t.title,
+          artist: t.artist,
+          section: t.section || 'hindi',
+          youtube_id: t.youtubeId || null,
+          data: t,
+          updated_at: catalog.updatedAt,
+        }));
         await supabase.from('songs').upsert(songRows, { onConflict: 'id' });
       }
     } catch (err) {
@@ -1922,6 +1941,17 @@ async function startServer() {
       const hasSupabase = Boolean(supaCreds);
       const catalog = ensureCatalogFile();
 
+      // Merge verified real play counts recorded on this website
+      try {
+        const playsFile = path.join(DATA_DIR, 'website-plays.json');
+        if (fs.existsSync(playsFile)) {
+          const plays = JSON.parse(fs.readFileSync(playsFile, 'utf-8'));
+          catalog.tracks.forEach((t) => {
+            t.playCount = plays[t.id] ?? t.playCount ?? 0;
+          });
+        }
+      } catch {}
+
       const since = String(req.query.since || '').trim();
       if (since && since === catalog.updatedAt) {
         res.json({
@@ -1955,6 +1985,63 @@ async function startServer() {
         storageMode: 'server-permanent',
         supabaseConfig: null,
       });
+    }
+  });
+
+  // POST /api/track-played — Records and persists live song play counts in database & Supabase
+  app.post('/api/track-played', async (req, res) => {
+    try {
+      const { trackId } = req.body || {};
+      if (!trackId || typeof trackId !== 'string') {
+        res.status(400).json({ error: 'Valid trackId is required' });
+        return;
+      }
+
+      // 1. Record real play count in website-plays.json
+      let realCount = 1;
+      try {
+        const playsFile = path.join(DATA_DIR, 'website-plays.json');
+        let plays: Record<string, number> = {};
+        if (fs.existsSync(playsFile)) {
+          plays = JSON.parse(fs.readFileSync(playsFile, 'utf-8'));
+        }
+        plays[trackId] = (plays[trackId] || 0) + 1;
+        realCount = plays[trackId];
+        fs.writeFileSync(playsFile, JSON.stringify(plays, null, 2));
+      } catch {}
+
+      // 2. Update catalog track
+      const catalog = ensureCatalogFile();
+      const trackIndex = catalog.tracks.findIndex((t) => t.id === trackId);
+      if (trackIndex !== -1) {
+        catalog.tracks[trackIndex].playCount = realCount;
+        catalog.updatedAt = new Date().toISOString();
+        writeCatalogToDiskAsync(catalog);
+
+        // 3. Background update to Supabase songs table
+        void (async () => {
+          try {
+            const creds = getSupabaseCredentials();
+            if (creds) {
+              const supabase = createClient(creds.url, creds.key, {
+                auth: { persistSession: false },
+              });
+              await supabase
+                .from('songs')
+                .update({
+                  data: catalog.tracks[trackIndex],
+                  updated_at: catalog.updatedAt,
+                })
+                .eq('id', trackId);
+            }
+          } catch {}
+        })();
+      }
+
+      res.json({ success: true, trackId, playCount: realCount });
+    } catch (err) {
+      console.warn('Error recording track play count:', err);
+      res.status(500).json({ error: 'Failed to record play count' });
     }
   });
 

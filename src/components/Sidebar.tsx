@@ -40,6 +40,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     playSection,
     triggerLogoClick,
     isAdminAuthenticated,
+    isPlayerOpen,
   } = useMusic();
 
   const [activeMenuPlaylistId, setActiveMenuPlaylistId] = useState<string | null>(null);
@@ -95,7 +96,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <GuitarLogo
             showText={true}
             size={38}
-            subtext="AuraStream Music"
+            subtext="Melodifi Music"
             onClick={triggerLogoClick}
           />
           <button
@@ -143,6 +144,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </button>
               );
             })}
+
+            {/* Music Player Bar Toggle Option */}
+            <button
+              onClick={() => {
+                triggerLogoClick();
+                onCloseMobile();
+              }}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs sm:text-sm font-medium transition-all duration-200 cursor-pointer ${
+                isPlayerOpen
+                  ? 'bg-rose-500/15 text-rose-300 font-semibold border-l-2 border-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.12)]'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              }`}
+              title="Toggle Music Player (3 clicks triggers Admin Panel)"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <GuitarLogo size={20} showText={false} />
+                <span className="truncate">{isPlayerOpen ? 'Hide Player' : 'Music Player'}</span>
+              </div>
+              <span className="text-[10px] text-amber-400 font-mono">
+                {isPlayerOpen ? 'Active' : 'Show'}
+              </span>
+            </button>
           </div>
 
           {/* Desi Music Hub (Pure cleanly formatted links with no debug tags) */}
@@ -278,7 +301,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Pure Music Streaming Footer */}
         <div className="shrink-0 p-3 border-t border-slate-800/60 bg-slate-900/30 text-center">
           <p className="text-[11px] text-slate-400 font-medium tracking-wide">
-            AuraStream Desi Audio
+            Melodifi Audio
           </p>
           <p className="text-[10px] text-slate-500 mt-0.5">
             HQ Indian & International Streaming
